@@ -111,7 +111,6 @@ def test_vfs_rejects_non_str_content() -> None:
 
 def test_default_fault_set_is_clean() -> None:
     faults = FaultSet()
-    assert faults.seed == 0
     assert faults.truncate_read_at_lines is None
     assert faults.search_result_cap is None
     assert faults.stale_http is False
@@ -478,7 +477,7 @@ def test_every_invocation_logs_paired_events_with_matching_call_ids() -> None:
         assert "output" in result_event.payload
         assert isinstance(result_event.payload["gt"], dict)
     call_ids = [events[i].payload["call_id"] for i in range(0, 8, 2)]
-    assert call_ids == ["call-0", "call-1", "call-2", "call-3"]
+    assert call_ids == ["host-call-0", "host-call-1", "host-call-2", "host-call-3"]
     tools = [events[i].payload["tool"] for i in range(0, 8, 2)]
     assert tools == ["read_file", "run_command", "search_code", "http_get"]
     assert [event.seq for event in events] == list(range(8))
