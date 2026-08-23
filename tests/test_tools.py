@@ -8,6 +8,7 @@ from typing import Any, Final
 import pytest
 from pydantic import ValidationError
 
+import awarebench.harness as harness_package
 from awarebench.events import EventLog, EventType
 from awarebench.harness.budget import BudgetAccountant
 from awarebench.harness.clock import CycleCounter, VirtualClock
@@ -776,3 +777,24 @@ def test_control_switch_changes_only_affected_tool_stream(preset_name: str) -> N
             assert clean_event.payload == fault_event.payload
         else:
             assert clean_event.payload != fault_event.payload
+
+
+# --- package export surface ---------------------------------------------------
+
+
+def test_harness_package_reexports_tool_layer() -> None:
+    assert harness_package.ToolHost is ToolHost
+    assert harness_package.FaultSet is FaultSet
+    assert harness_package.VirtualFilesystem is VirtualFilesystem
+    assert harness_package.CommandHandler is CommandHandler
+    assert harness_package.FAULT_SETS is FAULT_SETS
+    assert set(harness_package.__all__) == {
+        "FAULT_SETS",
+        "BudgetAccountant",
+        "CommandHandler",
+        "CycleCounter",
+        "FaultSet",
+        "ToolHost",
+        "VirtualClock",
+        "VirtualFilesystem",
+    }
