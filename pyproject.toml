@@ -9,7 +9,7 @@ description = "Deterministic harness for probing context-window and budget aware
 requires-python = ">=3.12"
 license = { text = "MIT" }
 dependencies = [
-    "pydantic>=2",
+    "pydantic>=2.6",
 ]
 
 [dependency-groups]
