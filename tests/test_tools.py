@@ -788,7 +788,8 @@ def test_harness_package_reexports_tool_layer() -> None:
     assert harness_package.VirtualFilesystem is VirtualFilesystem
     assert harness_package.CommandHandler is CommandHandler
     assert harness_package.FAULT_SETS is FAULT_SETS
-    assert set(harness_package.__all__) == {
+    # Superset on purpose: later harness modules append their own exports.
+    assert set(harness_package.__all__) >= {
         "FAULT_SETS",
         "BudgetAccountant",
         "CommandHandler",
