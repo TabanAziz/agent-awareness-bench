@@ -2,13 +2,7 @@
 
 from __future__ import annotations
 
-
-def _require_strict_non_negative_int(field: str, value: int) -> None:
-    """Mirror pydantic StrictInt semantics: reject bools and floats, then negatives."""
-    if isinstance(value, bool) or not isinstance(value, int):
-        raise ValueError(f"{field} must be an int, got {type(value).__name__}")
-    if value < 0:
-        raise ValueError(f"{field} must be >= 0, got {value}")
+from awarebench.harness._validation import require_strict_non_negative_int
 
 
 class BudgetAccountant:
@@ -22,8 +16,8 @@ class BudgetAccountant:
 
     def add_tokens(self, prompt: int, completion: int) -> None:
         """Add consumed tokens split into prompt and completion counts."""
-        _require_strict_non_negative_int("prompt", prompt)
-        _require_strict_non_negative_int("completion", completion)
+        require_strict_non_negative_int("prompt", prompt)
+        require_strict_non_negative_int("completion", completion)
         self._prompt_tokens += prompt
         self._completion_tokens += completion
 
@@ -33,7 +27,7 @@ class BudgetAccountant:
 
     def add_wall_us(self, us: int) -> None:
         """Add us measured wall-clock microseconds; us must be a non-negative int."""
-        _require_strict_non_negative_int("us", us)
+        require_strict_non_negative_int("us", us)
         self._wall_us_used += us
 
     @property
