@@ -1,0 +1,21 @@
+# local working notes; never committed
+.local/
+
+# python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+coverage.xml
+dist/
+build/
+
+# run artifacts (traces and reports are written here by the cli)
+runs/
+
+# environment
+.env
