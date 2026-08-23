@@ -6,7 +6,7 @@ build-backend = "hatchling.build"
 name = "awarebench"
 version = "0.1.0"
 description = "Deterministic harness for probing context-window and budget awareness in LLM agents."
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 license = { text = "MIT" }
 dependencies = [
     "pydantic>=2",
@@ -32,7 +32,7 @@ ignore = ["TRY004"]
 
 [tool.mypy]
 strict = true
-python_version = "3.11"
+python_version = "3.12"
 files = ["src", "tests"]
 
 [tool.pytest.ini_options]

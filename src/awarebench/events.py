@@ -13,7 +13,6 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
-    RootModel,
     StrictInt,
     field_validator,
     model_validator,
@@ -46,8 +45,11 @@ EventTypeLiteral = Literal[
     "report",
 ]
 
-JsonValue = RootModel[None | bool | int | float | str | list["JsonValue"] | dict[str, "JsonValue"]]
-"""Recursive JSON value type constraining Event payloads."""
+# PEP 695 recursive alias: native syntax gives pydantic a resolvable recursive
+# schema while storing plain Python values, and mypy resolves the self-reference
+# natively. Both wrapper-based and quoted-forward-ref forms fail one toolchain
+# or the other on older interpreters; this is why the floor is Python 3.12.
+type JsonValue = None | bool | int | float | str | list[JsonValue] | dict[str, JsonValue]
 
 
 def _reject_non_finite_floats(node: object) -> None:
@@ -101,28 +103,19 @@ class Event(BaseModel):
         """
         if self.type in (EventType.TOOL_CALL, EventType.TOOL_RESULT):
             call_id = self.payload.get("call_id")
-            if call_id is None or not isinstance(call_id.root, str):
-                raise ValueError(f"event type '{self.type}' requires payload field call_id: str")
+            if not isinstance(call_id, str) or not call_id:
+                raise ValueError(
+                    f"event type '{self.type}' requires non-empty payload field call_id: str"
+                )
         elif self.type == EventType.COMPACTION:
             dropped_seq = self.payload.get("dropped_seq")
-            if (
-                dropped_seq is None
-                or not isinstance(dropped_seq.root, list)
-                or not all(
-                    isinstance(item.root, int) and not isinstance(item.root, bool)
-                    for item in dropped_seq.root
-                )
+            if not isinstance(dropped_seq, list) or not all(
+                isinstance(item, int) and not isinstance(item, bool) for item in dropped_seq
             ):
                 raise ValueError(
                     f"event type '{self.type}' requires payload field dropped_seq: list[int]"
                 )
         return self
-
-
-# The recursive alias cannot resolve its self-reference until the module
-# namespace binds JsonValue, so both schemas are rebuilt explicitly here.
-JsonValue.model_rebuild()
-Event.model_rebuild()
 
 
 class EventLog:

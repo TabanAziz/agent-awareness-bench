@@ -9,7 +9,9 @@ I work in Java and TypeScript day to day; Python is not my home turf. The harnes
 
 ## Decision
 
-Python 3.11+ with `uv` for dependency and interpreter management, `pydantic` v2 for schemas, `pytest` for tests, `ruff` plus `mypy --strict` enforced in CI, Docker for probe environments, JSONL for traces.
+Python 3.12+ with `uv` for dependency and interpreter management, `pydantic` v2 for schemas, `pytest` for tests, `ruff` plus `mypy --strict` enforced in CI, Docker for probe environments, JSONL for traces.
+
+(The floor is 3.12 rather than 3.11 for one concrete reason: the event log's payload contract needs a recursive type alias that both pydantic and mypy resolve natively, and that is exactly PEP 695's `type` statement. Every pre-3.12 encoding of it fails one toolchain or the other.)
 
 ## Why
 

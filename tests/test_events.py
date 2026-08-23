@@ -56,7 +56,27 @@ def test_caller_dict_mutation_after_append_does_not_rewrite_history() -> None:
 
     payload["tool"] = "rewritten"
 
-    assert event.model_dump(mode="json")["payload"] == {"call_id": "c1", "tool": "shell"}
+    assert event.payload == {"call_id": "c1", "tool": "shell"}
+
+
+def test_payload_values_are_plain_python_objects() -> None:
+    log = EventLog()
+    event = log.append(
+        EventType.REPORT,
+        cycle=0,
+        t_us=0,
+        payload={"score": 0.75, "nested": {"a": [1, 2], "ok": True}},
+    )
+
+    assert event.payload["score"] == 0.75
+    assert type(event.payload["score"]) is float
+    nested = event.payload["nested"]
+    assert isinstance(nested, dict)
+    assert nested["ok"] is True
+    items = nested["a"]
+    assert isinstance(items, list)
+    assert items == [1, 2]
+    assert type(items[0]) is int
 
 
 def test_payload_key_insertion_order_does_not_change_bytes(tmp_path: Path) -> None:
@@ -160,13 +180,17 @@ def test_empty_log_roundtrip(tmp_path: Path) -> None:
     assert len(EventLog.read_jsonl(path)) == 0
 
 
-def test_tool_events_require_call_id() -> None:
+def test_tool_events_require_non_empty_call_id() -> None:
     log = EventLog()
 
     with pytest.raises(ValueError, match="call_id"):
         log.append(EventType.TOOL_CALL, 0, 0, {"tool": "shell"})
     with pytest.raises(ValueError, match="call_id"):
         log.append(EventType.TOOL_RESULT, 0, 0, {})
+    with pytest.raises(ValueError, match="call_id"):
+        log.append(EventType.TOOL_CALL, 0, 0, {"call_id": ""})
+    with pytest.raises(ValueError, match="call_id"):
+        log.append(EventType.TOOL_RESULT, 0, 0, {"call_id": ""})
 
     log.append(EventType.TOOL_CALL, 0, 0, {"call_id": "c1"})
     assert len(log) == 1
@@ -216,3 +240,10 @@ def test_event_type_constants_match_the_literal_union() -> None:
     assert EventType.FAULT_INJECTED == "fault_injected"
     assert EventType.BUDGET == "budget"
     assert EventType.REPORT == "report"
+
+
+def test_package_reexports_typed_event_helpers() -> None:
+    import awarebench
+
+    assert awarebench.EventTypeLiteral is EventTypeLiteral
+    assert awarebench.Event is Event
