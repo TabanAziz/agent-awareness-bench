@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 import pytest
 from pydantic import ValidationError
@@ -233,13 +233,14 @@ def test_read_file_missing_path_raises_without_logging() -> None:
     assert len(log) == 0
 
 
-def test_read_file_rejects_negative_start_line() -> None:
+@pytest.mark.parametrize("bad_start_line", [-1, True])
+def test_read_file_rejects_bad_start_line(bad_start_line: int) -> None:
     fs = VirtualFilesystem()
     fs.write("f.txt", "a\nb\n")
     host, log, *_ = _make_host(fs=fs)
 
     with pytest.raises(ValueError, match="start_line"):
-        host.read_file("f.txt", start_line=-1)
+        host.read_file("f.txt", start_line=bad_start_line)
 
     assert len(log) == 0
 
@@ -560,3 +561,218 @@ def test_identical_setups_produce_byte_identical_jsonl(tmp_path: Path) -> None:
     log_b.write_jsonl(path_b)
     assert path_a.read_bytes() == path_b.read_bytes()
     assert len(EventLog.read_jsonl(path_a)) == 12
+
+
+# --- call-id namespacing -----------------------------------------------------
+
+
+def _make_named_host(
+    log: EventLog,
+    clock: VirtualClock,
+    cycles: CycleCounter,
+    fs: VirtualFilesystem,
+    host_name: str,
+) -> ToolHost:
+    return ToolHost(
+        event_log=log,
+        clock=clock,
+        cycles=cycles,
+        budget=BudgetAccountant(),
+        fs=fs,
+        faults=FaultSet(),
+        command_handlers={},
+        http_table={},
+        host_name=host_name,
+    )
+
+
+def test_host_namespaces_keep_call_ids_unique_in_shared_log() -> None:
+    log = EventLog()
+    clock = VirtualClock()
+    cycles = CycleCounter()
+    fs = VirtualFilesystem()
+    fs.write("f.txt", "alpha\nbeta\n")
+    alpha = _make_named_host(log, clock, cycles, fs, "alpha")
+    beta = _make_named_host(log, clock, cycles, fs, "beta")
+
+    alpha.read_file("f.txt")
+    beta.read_file("f.txt")
+    alpha.search_code("alpha")
+    beta.search_code("beta")
+
+    call_ids = [event.payload["call_id"] for event in log if event.type == EventType.TOOL_CALL]
+    assert call_ids == ["alpha-call-0", "beta-call-0", "alpha-call-1", "beta-call-1"]
+    assert len(set(call_ids)) == len(call_ids)
+
+
+def test_tool_host_rejects_empty_host_name() -> None:
+    with pytest.raises(ValueError, match="host_name"):
+        ToolHost(
+            event_log=EventLog(),
+            clock=VirtualClock(),
+            cycles=CycleCounter(),
+            budget=BudgetAccountant(),
+            fs=VirtualFilesystem(),
+            faults=FaultSet(),
+            command_handlers={},
+            http_table={},
+            host_name="",
+        )
+
+
+# --- boundary equality: cap exactly at total is indistinguishable ------------
+
+
+def test_truncate_cap_equal_to_total_lines_is_indistinguishable_from_clean() -> None:
+    content = "l0\nl1\nl2\n"
+
+    def build_fs() -> VirtualFilesystem:
+        fs = VirtualFilesystem()
+        fs.write("notes.txt", content)
+        return fs
+
+    clean_host, clean_log, *_ = _make_host(fs=build_fs())
+    fault_host, fault_log, *_ = _make_host(faults=FaultSet(truncate_read_at_lines=3), fs=build_fs())
+
+    clean_out = clean_host.read_file("notes.txt")
+    fault_out = fault_host.read_file("notes.txt")
+
+    assert fault_out == clean_out == "l0\nl1\nl2"
+    assert list(fault_log)[-1].payload == list(clean_log)[-1].payload
+    assert list(fault_log)[-1].payload["gt"] == {
+        "total_lines": 3,
+        "returned_lines": 3,
+        "truncated": False,
+    }
+
+
+def test_search_cap_equal_to_total_matches_is_indistinguishable_from_clean() -> None:
+    def build_fs() -> VirtualFilesystem:
+        fs = VirtualFilesystem()
+        fs.write("b.py", "alpha\nbeta\nalpha beta\n")
+        fs.write("a.py", "beta here\ngamma\n")
+        return fs
+
+    clean_host, clean_log, *_ = _make_host(fs=build_fs())
+    fault_host, fault_log, *_ = _make_host(faults=FaultSet(search_result_cap=3), fs=build_fs())
+
+    clean_hits = clean_host.search_code("beta")
+    fault_hits = fault_host.search_code("beta")
+
+    assert fault_hits == clean_hits == [("a.py", 1), ("b.py", 2), ("b.py", 3)]
+    assert list(fault_log)[-1].payload == list(clean_log)[-1].payload
+    assert list(fault_log)[-1].payload["gt"] == {
+        "total_matches": 3,
+        "returned_matches": 3,
+        "capped": False,
+    }
+
+
+# --- handler failure: truthful failed result, then loud propagation ----------
+
+
+def test_raising_handler_logs_failed_result_then_propagates() -> None:
+    def exploding_handler(command: str) -> tuple[int, str]:
+        raise RuntimeError("handler exploded")
+
+    host, log, *_ = _make_host(handlers={"git": exploding_handler})
+
+    with pytest.raises(RuntimeError, match="handler exploded"):
+        host.run_command("git status")
+
+    events = list(log)
+    assert len(events) == 2
+    assert events[0].type == EventType.TOOL_CALL
+    assert events[1].type == EventType.TOOL_RESULT
+    assert events[1].payload["call_id"] == events[0].payload["call_id"]
+    assert events[1].payload["output"] == [1, ""]
+    assert events[1].payload["gt"] == {"executed": True, "handler_error": True}
+
+
+# --- control switch: preset vs clean differ only in the affected tool --------
+
+AFFECTED_TOOL: Final[dict[str, str]] = {
+    "truncated_read": "read_file",
+    "capped_search": "search_code",
+    "stale_http": "http_get",
+    "fake_success": "run_command",
+}
+
+SWITCH_PRESETS = (
+    "clean",
+    "truncated_read",
+    "capped_search",
+    "stale_http",
+    "fake_success",
+)
+
+
+def _build_switch_setup(
+    faults: FaultSet,
+) -> tuple[ToolHost, EventLog, VirtualClock, CycleCounter, BudgetAccountant]:
+    log = EventLog()
+    clock = VirtualClock()
+    cycles = CycleCounter()
+    budget = BudgetAccountant()
+    fs = VirtualFilesystem()
+    fs.write(
+        "docs/guide.md",
+        "# guide\nstep one\nstep two\nstep three\nstep four\nstep five\n",
+    )
+    fs.write("src/app.py", "def one():\n    return 1\n")
+
+    def git_handler(command: str) -> tuple[int, str]:
+        return 0, f"branch main ({command})\n"
+
+    host = ToolHost(
+        event_log=log,
+        clock=clock,
+        cycles=cycles,
+        budget=budget,
+        fs=fs,
+        faults=faults,
+        command_handlers={"git": git_handler},
+        http_table={"https://api.test/config": [("cfg-v1", 10), ("cfg-v2", 20)]},
+    )
+    return host, log, clock, cycles, budget
+
+
+def _run_switch_script(host: ToolHost, clock: VirtualClock, cycles: CycleCounter) -> None:
+    cycles.advance()
+    host.read_file("docs/guide.md")
+    host.run_command("git push origin main")
+    host.search_code("step|def")
+    clock.advance_us(500)
+    host.http_get("https://api.test/config")
+
+
+@pytest.mark.parametrize("preset_name", SWITCH_PRESETS)
+def test_control_switch_changes_only_affected_tool_stream(preset_name: str) -> None:
+    clean_host, clean_log, clean_clock, clean_cycles, clean_budget = _build_switch_setup(FaultSet())
+    fault_host, fault_log, fault_clock, fault_cycles, fault_budget = _build_switch_setup(
+        FAULT_SETS[preset_name]
+    )
+
+    _run_switch_script(clean_host, clean_clock, clean_cycles)
+    _run_switch_script(fault_host, fault_clock, fault_cycles)
+
+    assert clean_budget.snapshot() == fault_budget.snapshot()
+
+    clean_events = list(clean_log)
+    fault_events = list(fault_log)
+    assert len(clean_events) == len(fault_events) == 8
+    tools = [clean_events[i].payload["tool"] for i in range(0, 8, 2)]
+    affected = AFFECTED_TOOL.get(preset_name)
+    for index, (clean_event, fault_event) in enumerate(zip(clean_events, fault_events)):
+        assert clean_event.type == fault_event.type
+        assert clean_event.cycle == fault_event.cycle
+        assert clean_event.t_us == fault_event.t_us
+        if clean_event.type == EventType.TOOL_CALL:
+            assert clean_event.payload["call_id"] == fault_event.payload["call_id"]
+            assert clean_event.payload["args"] == fault_event.payload["args"]
+            continue
+        tool = tools[index // 2]
+        if affected is None or tool != affected:
+            assert clean_event.payload == fault_event.payload
+        else:
+            assert clean_event.payload != fault_event.payload
