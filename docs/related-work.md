@@ -1,6 +1,6 @@
 # Related work
 
-Before writing any harness code I spent the research phase reading. The rule I set for myself: every claim below links to a primary source I actually opened, and where I only have a secondary source or an unverified detail, I say so inline. Searched and verified in August 2026; this space moves fast enough that anything older than a year needs re-checking before you trust this page.
+Before writing any harness code I spent the research phase reading. The rule I set for myself: every claim below about a specific work links to a primary source I actually opened, and where I only have a secondary source or an unverified detail, I say so inline. Searched and verified in August 2026; this space moves fast enough that anything older than a year needs re-checking before you trust this page.
 
 The one-sentence conclusion: a lot of good work observes the symptoms I care about — agents looping after progress stops, trusting green signals over contradicting evidence, degrading after compaction — but it observes them from the outside, after the fact, or by handing the detection to the agent. Nothing I found scores whether the agent itself notices, inline, from evidence it already received — post-hoc detection labels don't count — and whether its behavior changes when it does. That is the slot this benchmark occupies. The precise argument lives in [gap.md](gap.md).
 
