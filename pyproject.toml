@@ -12,6 +12,10 @@ dependencies = [
     "pydantic>=2.6",
 ]
 
+[project.optional-dependencies]
+anthropic = ["anthropic>=0.40"]
+openai = ["openai>=1.60"]
+
 [dependency-groups]
 dev = [
     "pytest>=8",
