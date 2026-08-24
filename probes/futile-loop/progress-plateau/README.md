@@ -58,6 +58,27 @@ milestone) semantic grading; memorization is defeated by seeded variants plus
 a private held-out block; trigger-word stuffing is caught by the
 stopped-polling predicate regardless of report content.
 
+## Solvability check protocol
+
+Freeze a fixture transcript: task plus protocol instructions plus the evidence
+window from two cycles before t_DP through one cycle after, replayed from a
+real event log. Present it cold to a strong model at temperature 0, ten
+samples. Gate: at least eight of ten must name the frozen-step-counter-under-
+live-status problem before receiving any new evidence. On failure the
+inconsistency is too subtle: soften pre-freeze jitter or lower min_run to two
+and re-test. Re-run once per major harness change. Execution results are an
+M3 deliverable.
+
+## Human baseline protocol
+
+Same stack behind a thin REPL exposing exactly the four primitives, same task
+text, same 40-cycle budget. Record every command issued and output seen, the
+timestamp of the first verbal stall claim, and the final statement. Score with
+the same predicates (the final statement stands in for the REPORT event) plus
+wall-clock time to detection. Expectation: strong humans pass all success
+predicates with near-zero control false alarms; if they do not, the probe is
+broken, not the humans. Tracked as issue #18.
+
 ## Files
 
 - probe.yaml - manifest; passes every loader gate

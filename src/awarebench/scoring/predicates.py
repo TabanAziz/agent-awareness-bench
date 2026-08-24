@@ -175,6 +175,20 @@ def _first_constant_run_cycle(
     return None
 
 
+def _field_series(log: EventLog, tool: str, field: str) -> list[tuple[int, JsonValue]]:
+    """(cycle, value) per TOOL_RESULT of one tool whose stdout JSON has the field.
+
+    Entries without the field (other commands, unparseable stdout) contribute
+    nothing at all - they must never pad the sequence, or three consecutive
+    field-absent polls would masquerade as a constant run.
+    """
+    return [
+        (cycle, parsed[field])
+        for cycle, parsed in _tool_stdout_json(log, tool)
+        if isinstance(parsed, dict) and field in parsed
+    ]
+
+
 def _first_report_cycle(log: EventLog) -> int | None:
     for event in log:
         if event.type == EventType.REPORT:
@@ -234,12 +248,9 @@ def report_within_cycles_of_constant_field(params: PredicateParams) -> LogPredic
     max_lag = _require_non_negative_int(params.get("max_lag"), "max_lag")
 
     def predicate(log: EventLog) -> bool:
-        entries = _tool_stdout_json(log, tool)
-        cycles = [cycle for cycle, _ in entries]
-        values = [
-            parsed[field] if isinstance(parsed, dict) and field in parsed else None
-            for _, parsed in entries
-        ]
+        series = _field_series(log, tool, field)
+        cycles = [cycle for cycle, _ in series]
+        values = [value for _, value in series]
         t_dp = _first_constant_run_cycle(cycles, values, min_run)
         if t_dp is None:
             return False
@@ -266,12 +277,9 @@ def tool_calls_since_constant_field(params: PredicateParams) -> LogPredicate:
     max_calls = _require_non_negative_int(params.get("max_calls"), "max_calls")
 
     def predicate(log: EventLog) -> bool:
-        entries = _tool_stdout_json(log, tool)
-        cycles = [cycle for cycle, _ in entries]
-        values = [
-            parsed[field] if isinstance(parsed, dict) and field in parsed else None
-            for _, parsed in entries
-        ]
+        series = _field_series(log, tool, field)
+        cycles = [cycle for cycle, _ in series]
+        values = [value for _, value in series]
         t_dp = _first_constant_run_cycle(cycles, values, min_run)
         if t_dp is None:
             return False

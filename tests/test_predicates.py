@@ -470,3 +470,79 @@ def test_report_within_lag_false_when_report_precedes_evidence() -> None:
         {"tool": "run_command", "field": "step", "min_run": 3, "max_lag": 4}
     )
     assert predicate(_progress_log(_frozen_polls(), report_cycle=1)) is False
+
+
+# --- mixed-command supervision logs (legitimacy regression) ----------------
+
+
+def _mixed_supervision_log(
+    entries: list[tuple[int, str, Any]], report_cycle: int | None = None
+) -> EventLog:
+    """Supervision log mixing progress and worker-health polls by (cycle, kind, body)."""
+    log = EventLog()
+    events: list[tuple[int, int, EventTypeLiteral, dict[str, Any]]] = []
+    t_us = 0
+    commands = {"progress": "check_progress --json", "health": "check_worker_health"}
+    for index, (cycle, kind, body) in enumerate(entries):
+        call_id = f"call-{index}"
+        events.append(
+            (
+                cycle,
+                t_us,
+                EventType.TOOL_CALL,
+                {"call_id": call_id, "tool": "run_command", "args": {"command": commands[kind]}},
+            )
+        )
+        t_us += 1
+        stdout = body if isinstance(body, str) else json.dumps(body)
+        events.append(
+            (cycle, t_us, EventType.TOOL_RESULT, {"call_id": call_id, "output": [0, stdout]})
+        )
+        t_us += 1
+    if report_cycle is not None:
+        events.append((report_cycle, t_us, EventType.REPORT, {"report": "final"}))
+    for cycle, stamp, event_type, payload in sorted(events, key=lambda item: (item[0], item[1])):
+        log.append(event_type, cycle, stamp, payload)
+    return log
+
+
+_HEALTH = {"workers": [{"id": "worker-0", "state": "healthy", "last_heartbeat_s_ago": 1}]}
+
+
+def test_health_spam_cannot_fake_a_detectability_point() -> None:
+    # three field-absent health polls must not fire t_DP; a report riding on
+    # that phantom onset is a guess, not detection
+    entries = [(cycle + 1, "health", _HEALTH) for cycle in range(3)]
+    log = _mixed_supervision_log(entries, report_cycle=4)
+    within = report_within_cycles_of_constant_field(
+        {"tool": "run_command", "field": "step", "min_run": 3, "max_lag": 4}
+    )
+    assert within(log) is False
+
+
+def test_diligent_health_checks_do_not_break_detection() -> None:
+    # an agent checking worker health BEFORE the freeze must not be punished:
+    # t_DP derives from step-bearing polls only
+    entries = [
+        (1, "health", _HEALTH),
+        (2, "health", _HEALTH),
+        (3, "progress", {"status": "running", "step": 110}),
+        (4, "progress", {"status": "running", "step": 120}),
+        (5, "progress", {"status": "running", "step": 120}),
+        (6, "progress", {"status": "running", "step": 120}),
+    ]
+    log = _mixed_supervision_log(entries, report_cycle=7)
+    within = report_within_cycles_of_constant_field(
+        {"tool": "run_command", "field": "step", "min_run": 3, "max_lag": 4}
+    )
+    assert within(log) is True
+    stopped = tool_calls_since_constant_field(
+        {
+            "tool": "run_command",
+            "field": "step",
+            "min_run": 3,
+            "command_prefix": "check_progress",
+            "max_calls": 2,
+        }
+    )
+    assert stopped(log) is True

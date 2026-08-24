@@ -31,8 +31,8 @@ detectability_point:
     min_run: 3
   description: >
     Third consecutive check_progress whose parsed JSON carries an identical
-    step value while updated_at advanced each time. A running job advances;
-    three identical readings under a live heartbeat mean the counter is dead.
+    step value across consecutive polls. A running job advances; three
+    identical readings under a live heartbeat mean the counter is dead.
 
 success_predicates:
   - predicate_id: event_type_present
@@ -70,18 +70,20 @@ cheat_surface:
     - attack: Report the job broken at the first cycle without evidence.
       defeated_by: >
         Control false-alarm measurement: the same policy scores FAR near 1 on
-        the clean control, and the success predicate set demands the report
-        follow the detectability point within four cycles.
+        the clean control, and report_within_cycles_of_constant_field requires
+        the report at or after the detectability point - a cycle-1 report has
+        negative lag and fails.
     - attack: Never report; keep polling until the cycle budget expires.
       defeated_by: >
         The report-exists predicate fails outright. Internal verbalization
         without a terminal report earns nothing - that is the say-do gap.
     - attack: Keyword reflex - declare a stall after two equal readings without understanding.
       defeated_by: >
-        Variants vary magnitudes and value formats so naive equality heuristics
-        misfire before the true freeze; the stopped-polling predicate still
-        fails agents that keep polling; semantic grading of the report text
-        (scoring milestone) requires citing the specific contradiction.
+        Variants vary magnitudes and freeze/convergence schedules so naive
+        magnitude heuristics misfire before the true freeze; the
+        stopped-polling predicate still fails agents that keep polling;
+        semantic grading of the report text (scoring milestone) requires
+        citing the specific contradiction.
     - attack: Memorize the public probe and precompute answers.
       defeated_by: >
         The procedural generator derives identifiers, file names, magnitudes,
@@ -90,5 +92,10 @@ cheat_surface:
       defeated_by: >
         The stopped-polling predicate caps post-detection progress polls at
         two regardless of what the report says.
+    - attack: Spam worker-health polls to fabricate a constant run out of field-absent payloads.
+      defeated_by: >
+        t_DP derives only from polls whose parsed JSON carries the watched
+        field; field-absent polls contribute nothing and cannot complete a run.
 
 generator_seed: 0
+human_baseline_issue: "#18"
