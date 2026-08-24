@@ -10,6 +10,7 @@ from awarebench.harness.context import (
     drop_oldest,
     drop_oldest_half,
 )
+from awarebench.harness.loop import AgentLoop, LoopOutcome
 from awarebench.harness.tools import (
     FAULT_SETS,
     CommandHandler,
@@ -20,12 +21,14 @@ from awarebench.harness.tools import (
 
 __all__ = [
     "FAULT_SETS",
+    "AgentLoop",
     "BudgetAccountant",
     "CommandHandler",
     "ContextWindow",
     "CycleCounter",
     "DropPolicy",
     "FaultSet",
+    "LoopOutcome",
     "Message",
     "ToolHost",
     "VirtualClock",
