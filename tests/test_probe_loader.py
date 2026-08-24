@@ -239,6 +239,8 @@ def test_missing_cheat_surface_analysis_gate(tmp_path: Path) -> None:
         ("generator", "../generator.py"),
         ("control", "/abs/control.py"),
         ("injection", "..\\injection.py"),
+        ("generator", "D:escape.py"),
+        ("injection", "C:../injection.py"),
     ],
 )
 def test_unsafe_path_gate(field: str, bad_ref: str, tmp_path: Path) -> None:

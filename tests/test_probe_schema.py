@@ -118,8 +118,10 @@ def test_manifest_rejects_empty_task() -> None:
     [
         ("environment_dockerfile", "/abs/Dockerfile"),
         ("environment_dockerfile", "C:/env/Dockerfile"),
+        ("environment_dockerfile", "D:escape.py"),
         ("environment_dockerfile", ""),
         ("injection", "../injection.py"),
+        ("injection", "C:../injection.py"),
         ("injection", ""),
         ("control", "..\\control.py"),
         ("control", ""),

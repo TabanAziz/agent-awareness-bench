@@ -35,14 +35,22 @@ PATH_FIELDS: Final[tuple[str, ...]] = (
 
 
 def validate_relative_path(value: str) -> str:
-    """Reject empty, backslashed, absolute, or parent-traversing manifest paths."""
+    """Reject empty, backslashed, absolute, or parent-traversing manifest paths.
+
+    Both POSIX and Windows path grammars are checked: "D:escape.py" carries a
+    Windows drive (and resets drives when joined), and "C:../escape.py" glues
+    into one POSIX component, so the parent-traversal check must also run on
+    the Windows parse.
+    """
     if not value:
         raise ValueError("path must be non-empty")
     if "\\" in value:
         raise ValueError(f"unsafe path {value!r}: forward slashes only")
     if PurePosixPath(value).is_absolute() or PureWindowsPath(value).is_absolute():
         raise ValueError(f"unsafe path {value!r}: must be relative")
-    if ".." in PurePosixPath(value).parts:
+    if PureWindowsPath(value).drive:
+        raise ValueError(f"unsafe path {value!r}: drive-qualified paths are not allowed")
+    if ".." in PurePosixPath(value).parts or ".." in PureWindowsPath(value).parts:
         raise ValueError(f"unsafe path {value!r}: must not traverse parents")
     return value
 
