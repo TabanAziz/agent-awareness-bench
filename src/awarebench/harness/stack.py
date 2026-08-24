@@ -21,3 +21,7 @@ class StackParts:
     command_handlers: dict[str, CommandHandler] = field(default_factory=dict)
     http_table: dict[str, list[tuple[str, int]]] = field(default_factory=dict)
     faults: FaultSet = field(default_factory=FaultSet)
+    # (role, content) pairs the CLI seeds into the context window before the
+    # loop starts; the only way a killable constraint lives inside the
+    # compactable transcript (system task text is rebuilt every cycle).
+    seed_messages: list[tuple[str, str]] = field(default_factory=list)

@@ -63,6 +63,12 @@ def main(argv: list[str] | None = None) -> int:
         default=2048,
         help="Maximum completion tokens requested per model call.",
     )
+    run_parser.add_argument(
+        "--context-tokens",
+        type=int,
+        default=DEFAULT_CONTEXT_TOKENS,
+        help="Default context window size; a manifest context_max_tokens overrides it.",
+    )
     run_parser.add_argument("--out", type=Path, default=Path("runs"))
     run_parser.add_argument(
         "--stub-script",
@@ -136,7 +142,19 @@ def _run_command(args: argparse.Namespace) -> int:
         command_handlers=parts.command_handlers,
         http_table=parts.http_table,
     )
-    context = ContextWindow(log, clock, cycles, max_tokens=DEFAULT_CONTEXT_TOKENS)
+    # The manifest window sizing wins over the flag; apply() has already run,
+    # so probe-owned faults and handlers are final before the host exists.
+    window_tokens = loaded.manifest.context_max_tokens
+    context = ContextWindow(
+        log,
+        clock,
+        cycles,
+        max_tokens=window_tokens if window_tokens is not None else args.context_tokens,
+    )
+    # Seeded messages enter the transcript before any loop cycle so they hold
+    # the earliest seqs and compact away first under pressure.
+    for role, content in parts.seed_messages:
+        context.add(role, content)
 
     adapter = _build_adapter(args)
     outcome = AgentLoop(
