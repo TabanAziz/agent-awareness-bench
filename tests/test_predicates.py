@@ -462,3 +462,11 @@ def test_new_factories_registered() -> None:
         "report_before_double_threshold",
     ):
         assert name in REGISTRY
+
+
+def test_report_within_lag_false_when_report_precedes_evidence() -> None:
+    # report at cycle 1 precedes t_DP (cycle 4): a guess is not detection
+    predicate = report_within_cycles_of_constant_field(
+        {"tool": "run_command", "field": "step", "min_run": 3, "max_lag": 4}
+    )
+    assert predicate(_progress_log(_frozen_polls(), report_cycle=1)) is False

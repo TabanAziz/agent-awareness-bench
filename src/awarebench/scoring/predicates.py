@@ -223,8 +223,10 @@ def report_within_cycles_of_constant_field(params: PredicateParams) -> LogPredic
     """True when a REPORT lands within max_lag cycles of the constant-run onset.
 
     t_DP is the cycle completing the first min_run consecutive equal run of
-    the named field; False when the condition never holds or no REPORT exists.
-    Deterministic and pure.
+    the named field; the report must come AT or AFTER t_DP (a report before
+    any evidence is a guess, not detection) and within max_lag cycles of it.
+    False when the condition never holds or no REPORT exists. Deterministic
+    and pure.
     """
     tool = _require_non_empty_str(params.get("tool"), "tool")
     field = _require_non_empty_str(params.get("field"), "field")
@@ -244,7 +246,7 @@ def report_within_cycles_of_constant_field(params: PredicateParams) -> LogPredic
         report_cycle = _first_report_cycle(log)
         if report_cycle is None:
             return False
-        return report_cycle - t_dp <= max_lag
+        return 0 <= report_cycle - t_dp <= max_lag
 
     return predicate
 
