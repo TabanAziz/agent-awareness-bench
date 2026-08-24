@@ -8,9 +8,11 @@ unexpected exceptions (traceback on stderr).
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import sys
 import traceback
 from pathlib import Path
+from types import ModuleType
 from typing import Final
 
 from awarebench.adapters import AnthropicAdapter, ModelAdapter, OpenAIAdapter, StubAdapter
@@ -19,9 +21,12 @@ from awarebench.harness.budget import BudgetAccountant
 from awarebench.harness.clock import CycleCounter, VirtualClock
 from awarebench.harness.context import ContextWindow
 from awarebench.harness.loop import AgentLoop
-from awarebench.harness.tools import FaultSet, ToolHost, VirtualFilesystem
-from awarebench.probes.loader import ProbeGateError, load_probe
+from awarebench.harness.stack import StackParts
+from awarebench.harness.tools import ToolHost
+from awarebench.probes.loader import LoadedProbe, ProbeGateError, load_probe
 from awarebench.report import build_report
+from awarebench.scoring.evaluate import evaluate
+from awarebench.scoring.evaluate import passed as all_predicates_pass
 
 DEFAULT_CONTEXT_TOKENS: Final[int] = 16_384
 
@@ -45,6 +50,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     run_parser.add_argument("--model-name", default=None, help="Model id for vendor adapters.")
     run_parser.add_argument("--seed", type=int, default=0)
+    run_parser.add_argument(
+        "--variant",
+        choices=("fault", "control"),
+        default="fault",
+        help="Run the injected variant or its clean control.",
+    )
     run_parser.add_argument("--max-cycles", type=int, default=40)
     run_parser.add_argument(
         "--max-tokens",
@@ -73,6 +84,33 @@ def main(argv: list[str] | None = None) -> int:
         return 3
 
 
+def _load_artifact(path: Path, module_name: str) -> ModuleType:
+    """Import a probe artifact module from its resolved path."""
+    spec = importlib.util.spec_from_file_location(module_name, path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot load probe artifact: {path.name}")
+    module = importlib.util.module_from_spec(spec)
+    # dataclasses resolve string annotations via sys.modules[module.__name__];
+    # registering also makes sibling imports between artifacts resolvable.
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _build_stack(loaded: LoadedProbe, log: EventLog, *, seed: int, variant: str) -> StackParts:
+    """Derive the seeded variant and let the probe's artifacts fill the stack."""
+    stem = f"awarebench_probe_{loaded.manifest.id}"
+    generator = _load_artifact(loaded.generator, f"{stem}_generator")
+    # Injection/control modules import their sibling generator by name; make
+    # the just-loaded module resolvable so each probe sees its own copy.
+    sys.modules["generator"] = generator
+    parts = StackParts()
+    artifact_path = loaded.injection if variant == "fault" else loaded.control
+    applier = _load_artifact(artifact_path, f"{stem}_{variant}")
+    applier.apply(parts, seed, log, generator.generate(seed))
+    return parts
+
+
 def _run_command(args: argparse.Namespace) -> int:
     if args.model != "stub" and not args.model_name:
         print(f"--model-name is required for --model {args.model}", file=sys.stderr)
@@ -87,15 +125,16 @@ def _run_command(args: argparse.Namespace) -> int:
     clock = VirtualClock()
     cycles = CycleCounter()
     budget = BudgetAccountant()
+    parts = _build_stack(loaded, log, seed=args.seed, variant=args.variant)
     host = ToolHost(
         log,
         clock,
         cycles,
         budget,
-        VirtualFilesystem(),
-        FaultSet(),
-        command_handlers={},
-        http_table={},
+        parts.fs,
+        parts.faults,
+        command_handlers=parts.command_handlers,
+        http_table=parts.http_table,
     )
     context = ContextWindow(log, clock, cycles, max_tokens=DEFAULT_CONTEXT_TOKENS)
 
@@ -111,17 +150,20 @@ def _run_command(args: argparse.Namespace) -> int:
         cycles=cycles,
         max_cycles=args.max_cycles,
         max_completion_tokens=args.max_tokens,
+        seed=args.seed,
     ).run()
 
     snapshot = budget.snapshot()
+    score = evaluate(loaded, log, control=args.variant == "control")
     out_dir = args.out / loaded.manifest.id / f"{args.model}-s{args.seed}"
     log.write_jsonl(out_dir / "events.jsonl")
-    build_report(loaded, args.model, args.seed, outcome, snapshot).write_json(
+    build_report(loaded, args.model, args.seed, outcome, snapshot, predicates=score).write_json(
         out_dir / "report.json"
     )
     print(
         f"outcome={outcome.status} cycles={outcome.cycles_used} "
-        f"tokens={snapshot['prompt_tokens']}+{snapshot['completion_tokens']}"
+        f"tokens={snapshot['prompt_tokens']}+{snapshot['completion_tokens']} "
+        f"passed={all_predicates_pass(score)}"
     )
     return 0
 
