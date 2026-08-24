@@ -40,13 +40,18 @@ class OpenAIAdapter:
     def _default_client(self) -> Any:
         try:
             sdk = _import_openai_sdk()
+            return sdk.OpenAI()
+        except AdapterError:
+            raise
         except ImportError as exc:
             msg = (
                 "OpenAIAdapter requires the 'openai' package; "
                 "install it with: pip install awarebench[openai]"
             )
             raise AdapterError(msg) from exc
-        return sdk.OpenAI()
+        except Exception as exc:
+            msg = f"failed to construct default OpenAI client: {type(exc).__name__}: {exc}"
+            raise AdapterError(msg) from exc
 
     def complete(
         self,

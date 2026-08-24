@@ -40,13 +40,18 @@ class AnthropicAdapter:
     def _default_client(self) -> Any:
         try:
             sdk = _import_anthropic_sdk()
+            return sdk.Anthropic()
+        except AdapterError:
+            raise
         except ImportError as exc:
             msg = (
                 "AnthropicAdapter requires the 'anthropic' package; "
                 "install it with: pip install awarebench[anthropic]"
             )
             raise AdapterError(msg) from exc
-        return sdk.Anthropic()
+        except Exception as exc:
+            msg = f"failed to construct default Anthropic client: {type(exc).__name__}: {exc}"
+            raise AdapterError(msg) from exc
 
     def complete(
         self,
@@ -80,13 +85,13 @@ class AnthropicAdapter:
         if not isinstance(content, (list, tuple)):
             msg = "malformed anthropic response: content must be a list of blocks"
             raise AdapterError(msg)
-        text: str | None = None
+        parts: list[str] = []
         for block in content:
             candidate = getattr(block, "text", None)
             if isinstance(candidate, str):
-                text = candidate
-                break
-        if text is None:
+                parts.append(candidate)
+        text = "\n".join(parts)
+        if not text:
             msg = "malformed anthropic response: no content block carries text"
             raise AdapterError(msg)
         usage = _require_attr(response, "usage")

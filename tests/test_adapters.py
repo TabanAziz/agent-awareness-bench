@@ -194,6 +194,27 @@ def test_anthropic_maps_fields_exactly() -> None:
             "max_tokens": 64,
         }
     ]
+    assert "system" not in endpoint.calls[0]
+
+
+def test_anthropic_concatenates_all_text_blocks() -> None:
+    response = SimpleNamespace(
+        content=[
+            SimpleNamespace(text="first"),
+            SimpleNamespace(flags=1),  # non-text block interleaved
+            SimpleNamespace(text="second"),
+        ],
+        usage=SimpleNamespace(input_tokens=11, output_tokens=7),
+        stop_reason="end_turn",
+        model="claude-x",
+        id="msg_1",
+    )
+    endpoint = _RecordingEndpoint(response)
+    adapter = AnthropicAdapter(model="claude-x", client=SimpleNamespace(messages=endpoint))
+
+    result = adapter.complete([{"role": "user", "content": "hi"}])
+
+    assert result.text == "first\nsecond"
 
 
 def test_anthropic_omits_max_tokens_when_not_requested() -> None:
@@ -272,6 +293,38 @@ def test_anthropic_without_client_names_missing_extra(monkeypatch: pytest.Monkey
     assert isinstance(excinfo.value.__cause__, ImportError)
 
 
+def test_anthropic_wraps_non_import_error_from_lazy_import(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _raise_runtime_error() -> Any:
+        raise RuntimeError("sdk exploded on import")
+
+    monkeypatch.setattr(anthropic_module, "_import_anthropic_sdk", _raise_runtime_error)
+    adapter = AnthropicAdapter(model="claude-x")
+
+    with pytest.raises(AdapterError, match="construct") as excinfo:
+        adapter.complete([{"role": "user", "content": "hi"}])
+
+    assert isinstance(excinfo.value.__cause__, RuntimeError)
+
+
+def test_anthropic_wraps_default_client_constructor_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _boom() -> Any:
+        raise RuntimeError("missing api key")
+
+    fake_sdk = SimpleNamespace(Anthropic=_boom)
+    monkeypatch.setattr(anthropic_module, "_import_anthropic_sdk", lambda: fake_sdk)
+    adapter = AnthropicAdapter(model="claude-x")
+
+    with pytest.raises(AdapterError, match="construct") as excinfo:
+        adapter.complete([{"role": "user", "content": "hi"}])
+
+    assert isinstance(excinfo.value.__cause__, RuntimeError)
+    assert str(excinfo.value.__cause__) == "missing api key"
+
+
 def test_anthropic_constructs_default_client_lazily(monkeypatch: pytest.MonkeyPatch) -> None:
     endpoint = _RecordingEndpoint(_anthropic_response())
     fake_client = SimpleNamespace(messages=endpoint)
@@ -322,6 +375,27 @@ def test_openai_omits_max_tokens_when_not_requested() -> None:
     adapter.complete([{"role": "user", "content": "hi"}])
 
     assert "max_tokens" not in endpoint.calls[0]
+
+
+def test_openai_uses_first_choice_when_multiple_returned() -> None:
+    response = SimpleNamespace(
+        choices=[
+            SimpleNamespace(message=SimpleNamespace(content="first"), finish_reason="stop"),
+            SimpleNamespace(message=SimpleNamespace(content="second"), finish_reason="length"),
+        ],
+        usage=SimpleNamespace(prompt_tokens=11, completion_tokens=7),
+        model="gpt-x",
+        id="cmpl_1",
+    )
+    endpoint = _RecordingEndpoint(response)
+    adapter = OpenAIAdapter(
+        model="gpt-x", client=SimpleNamespace(chat=SimpleNamespace(completions=endpoint))
+    )
+
+    result = adapter.complete([{"role": "user", "content": "hi"}])
+
+    assert result.text == "first"
+    assert result.stop_reason == "stop"
 
 
 @pytest.mark.parametrize("finish_reason", [None, ""])
@@ -395,6 +469,34 @@ def test_openai_without_client_names_missing_extra(monkeypatch: pytest.MonkeyPat
         adapter.complete([{"role": "user", "content": "hi"}])
 
     assert isinstance(excinfo.value.__cause__, ImportError)
+
+
+def test_openai_wraps_non_import_error_from_lazy_import(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _raise_runtime_error() -> Any:
+        raise RuntimeError("sdk exploded on import")
+
+    monkeypatch.setattr(openai_module, "_import_openai_sdk", _raise_runtime_error)
+    adapter = OpenAIAdapter(model="gpt-x")
+
+    with pytest.raises(AdapterError, match="construct") as excinfo:
+        adapter.complete([{"role": "user", "content": "hi"}])
+
+    assert isinstance(excinfo.value.__cause__, RuntimeError)
+
+
+def test_openai_wraps_default_client_constructor_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _boom() -> Any:
+        raise RuntimeError("missing api key")
+
+    fake_sdk = SimpleNamespace(OpenAI=_boom)
+    monkeypatch.setattr(openai_module, "_import_openai_sdk", lambda: fake_sdk)
+    adapter = OpenAIAdapter(model="gpt-x")
+
+    with pytest.raises(AdapterError, match="construct") as excinfo:
+        adapter.complete([{"role": "user", "content": "hi"}])
+
+    assert isinstance(excinfo.value.__cause__, RuntimeError)
+    assert str(excinfo.value.__cause__) == "missing api key"
 
 
 def test_openai_constructs_default_client_lazily(monkeypatch: pytest.MonkeyPatch) -> None:
