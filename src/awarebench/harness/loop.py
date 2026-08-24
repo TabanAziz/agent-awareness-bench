@@ -23,8 +23,17 @@ tool-result user message and the run continues.
 
 The system message sent to the adapter is the probe task followed by these
 protocol instructions; the rest of the request is the context transcript.
-Budget exhaustion enforcement lands with cost-capped probes; the
-"budget_exhausted" outcome is reserved until then.
+Every completion requests at most max_completion_tokens output tokens; the
+Anthropic Messages API requires this parameter on every call, so the loop
+always supplies it rather than leaving it to each adapter. Budget exhaustion
+enforcement lands with cost-capped probes; the "budget_exhausted" outcome is
+reserved until then.
+
+When adding a turn to the context would overflow the window and no compaction
+can make room, ContextWindow rejects the message. The loop never clamps or
+truncates: it terminates with the truthful "context_overflow" outcome, and the
+full reply text of the offending turn remains available in its MODEL_MESSAGE
+event.
 """
 
 from __future__ import annotations
@@ -40,17 +49,14 @@ from awarebench.harness._validation import require_strict_positive_int
 from awarebench.harness.budget import BudgetAccountant
 from awarebench.harness.clock import CycleCounter, VirtualClock
 from awarebench.harness.context import ContextWindow
-from awarebench.harness.tools import ToolHost
+from awarebench.harness.tools import TOOL_NAMES, ToolHost
 from awarebench.probes.loader import LoadedProbe
 
 DEFAULT_CYCLE_STEP_US: Final[int] = 60_000_000
+DEFAULT_MAX_COMPLETION_TOKENS: Final[int] = 2048
 
 NUDGE_TEXT: Final[str] = (
     "your last message was not valid JSON per the protocol; respond with one JSON object"
-)
-
-TOOL_NAMES: Final[frozenset[str]] = frozenset(
-    {"read_file", "run_command", "search_code", "http_get"}
 )
 
 _PROTOCOL_INSTRUCTIONS: Final[str] = (
@@ -68,9 +74,15 @@ _PROTOCOL_INSTRUCTIONS: Final[str] = (
 class LoopOutcome(BaseModel):
     """Terminal state of one AgentLoop.run()."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
-    status: Literal["reported", "cycle_exhausted", "budget_exhausted", "adapter_failed"]
+    status: Literal[
+        "reported",
+        "cycle_exhausted",
+        "budget_exhausted",
+        "adapter_failed",
+        "context_overflow",
+    ]
     report_text: str | None
     cycles_used: int
 
@@ -95,9 +107,11 @@ class AgentLoop:
         cycles: CycleCounter,
         max_cycles: int,
         cycle_step_us: int = DEFAULT_CYCLE_STEP_US,
+        max_completion_tokens: int = DEFAULT_MAX_COMPLETION_TOKENS,
     ) -> None:
         require_strict_positive_int("max_cycles", max_cycles)
         require_strict_positive_int("cycle_step_us", cycle_step_us)
+        require_strict_positive_int("max_completion_tokens", max_completion_tokens)
         self._probe = probe
         self._seed = probe.manifest.generator_seed
         self._adapter = adapter
@@ -109,6 +123,7 @@ class AgentLoop:
         self._cycles = cycles
         self._max_cycles = max_cycles
         self._cycle_step_us = cycle_step_us
+        self._max_completion_tokens = max_completion_tokens
 
     @property
     def seed(self) -> int:
@@ -125,7 +140,9 @@ class AgentLoop:
 
             messages = self._build_messages()
             try:
-                response = self._adapter.complete(messages, temperature=0.0)
+                response = self._adapter.complete(
+                    messages, temperature=0.0, max_tokens=self._max_completion_tokens
+                )
             except AdapterError as exc:
                 self._log.append(
                     EventType.MODEL_MESSAGE,
@@ -145,13 +162,19 @@ class AgentLoop:
                     "text": response.text,
                     "prompt_tokens": response.prompt_tokens,
                     "completion_tokens": response.completion_tokens,
+                    "model": response.model,
+                    "request_id": response.request_id,
+                    "stop_reason": response.stop_reason,
                 },
             )
             self._budget.add_tokens(response.prompt_tokens, response.completion_tokens)
 
             action = _parse_action(response.text)
             if action is None:
-                self._context.add("user", NUDGE_TEXT)
+                try:
+                    self._context.add("user", NUDGE_TEXT)
+                except ValueError:
+                    return self._overflow(cycles_used)
                 continue
             if action["type"] == "final":
                 report_text = action["report"]
@@ -165,11 +188,21 @@ class AgentLoop:
                     status="reported", report_text=report_text, cycles_used=cycles_used
                 )
 
-            self._context.add("assistant", response.text)
+            try:
+                self._context.add("assistant", response.text)
+            except ValueError:
+                return self._overflow(cycles_used)
             result_repr = self._execute_tool(action)
-            self._context.add("user", result_repr)
+            try:
+                self._context.add("user", result_repr)
+            except ValueError:
+                return self._overflow(cycles_used)
 
         return LoopOutcome(status="cycle_exhausted", report_text=None, cycles_used=cycles_used)
+
+    def _overflow(self, cycles_used: int) -> LoopOutcome:
+        """Terminal outcome when the window cannot hold the next transcript message."""
+        return LoopOutcome(status="context_overflow", report_text=None, cycles_used=cycles_used)
 
     def _build_messages(self) -> list[dict[str, str]]:
         """System message (task + protocol) followed by the context transcript."""

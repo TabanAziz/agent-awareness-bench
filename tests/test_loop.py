@@ -14,7 +14,12 @@ from awarebench.harness.budget import BudgetAccountant
 from awarebench.harness.clock import CycleCounter, VirtualClock
 from awarebench.harness.context import ContextWindow
 from awarebench.harness.loop import NUDGE_TEXT, AgentLoop
-from awarebench.harness.tools import FaultSet, ToolHost, VirtualFilesystem
+from awarebench.harness.tools import (
+    TOOL_NAMES,
+    FaultSet,
+    ToolHost,
+    VirtualFilesystem,
+)
 from awarebench.probes.loader import LoadedProbe, load_probe
 
 _TOOL_CALL: Final[str] = (
@@ -22,6 +27,20 @@ _TOOL_CALL: Final[str] = (
     '"action": {"type": "tool", "name": "read_file", "args": {"path": "notes.txt"}}}'
 )
 _FINAL_REPORT: Final[str] = '{"thought": "done", "action": {"type": "final", "report": "all good"}}'
+# ~470 chars of JSON: far beyond a 64-token (256-char) window once added.
+_OVERSIZED_TOOL_CALL: Final[str] = (
+    '{"thought": "' + "x" * 400 + '", '
+    '"action": {"type": "tool", "name": "read_file", "args": {"path": "notes.txt"}}}'
+)
+
+# Per-tool inputs whose domain rejection names exactly one dispatch branch, so
+# the sync test can prove each TOOL_NAMES entry reaches its own primitive.
+_DISPATCH_PROBES: Final[dict[str, tuple[dict[str, str], str]]] = {
+    "read_file": ({"path": "missing.txt"}, "no such file"),
+    "run_command": ({"command": "git status"}, "no command handler registered"),
+    "search_code": ({"pattern": "["}, "invalid regex pattern"),
+    "http_get": ({"url": "https://example.invalid"}, "no http table entry"),
+}
 
 
 def _loaded_probe(tmp_path: Path, task: str = "make the gate green") -> LoadedProbe:
@@ -60,7 +79,14 @@ def _loaded_probe(tmp_path: Path, task: str = "make the gate green") -> LoadedPr
 class _Stack:
     """Fully wired loop stack; separate instances are perfectly isolated."""
 
-    def __init__(self, tmp_path: Path, responses: list[str], *, max_cycles: int = 5) -> None:
+    def __init__(
+        self,
+        tmp_path: Path,
+        responses: list[str],
+        *,
+        max_cycles: int = 5,
+        max_tokens: int = 4096,
+    ) -> None:
         self.log = EventLog()
         self.clock = VirtualClock()
         self.cycles = CycleCounter()
@@ -77,7 +103,7 @@ class _Stack:
             command_handlers={},
             http_table={},
         )
-        self.context = ContextWindow(self.log, self.clock, self.cycles, max_tokens=4096)
+        self.context = ContextWindow(self.log, self.clock, self.cycles, max_tokens=max_tokens)
         self.probe = _loaded_probe(tmp_path)
         self.loop = self.new_loop(StubAdapter(responses), max_cycles=max_cycles)
 
@@ -128,7 +154,20 @@ def test_tool_call_then_final_report(tmp_path: Path) -> None:
 
     assert len(_events_of_type(stack.log, EventType.TOOL_CALL)) == 1
     assert len(_events_of_type(stack.log, EventType.TOOL_RESULT)) == 1
-    assert len(_events_of_type(stack.log, EventType.MODEL_MESSAGE)) == 2
+    model_messages = _events_of_type(stack.log, EventType.MODEL_MESSAGE)
+    assert len(model_messages) == 2
+
+    # Exact MODEL_MESSAGE payloads: stub metadata is None/None with end_turn.
+    assert model_messages[0].payload == {
+        "text": _TOOL_CALL,
+        "prompt_tokens": model_messages[0].payload["prompt_tokens"],
+        "completion_tokens": model_messages[0].payload["completion_tokens"],
+        "model": None,
+        "request_id": None,
+        "stop_reason": "end_turn",
+    }
+    assert model_messages[1].payload["text"] == _FINAL_REPORT
+    assert model_messages[1].payload["stop_reason"] == "end_turn"
 
     assert stack.budget.tool_calls == 1
     assert stack.budget.prompt_tokens > 0
@@ -217,3 +256,34 @@ def test_identical_loops_produce_byte_identical_jsonl(tmp_path: Path) -> None:
     # Deterministic event budget for [tool_call, final_report]:
     # cycle 1 -> model_message + tool_call + tool_result, cycle 2 -> model_message + report.
     assert len(first.decode("utf-8").splitlines()) == 5
+
+
+def test_oversized_reply_ends_in_context_overflow(tmp_path: Path) -> None:
+    stack = _Stack(tmp_path, [_OVERSIZED_TOOL_CALL], max_cycles=5, max_tokens=64)
+
+    outcome = stack.loop.run()  # must not raise
+
+    assert outcome.status == "context_overflow"
+    assert outcome.report_text is None
+    assert outcome.cycles_used == 1
+    messages = _events_of_type(stack.log, EventType.MODEL_MESSAGE)
+    assert len(messages) == 1
+    # The trace stays truthful: the full oversized reply is preserved in the log.
+    assert messages[0].payload["text"] == _OVERSIZED_TOOL_CALL
+    assert len(_events_of_type(stack.log, EventType.TOOL_CALL)) == 0
+
+
+def test_tool_names_stay_in_sync_with_execute_dispatch(tmp_path: Path) -> None:
+    assert TOOL_NAMES == frozenset({"read_file", "run_command", "search_code", "http_get"})
+
+    for name, (args, expected_error) in _DISPATCH_PROBES.items():
+        root = tmp_path / name
+        root.mkdir()
+        stack = _Stack(root, ["unused"])
+        reply = json.dumps(
+            {"thought": "probe", "action": {"type": "tool", "name": name, "args": args}}
+        )
+        stack.new_loop(StubAdapter([reply, _FINAL_REPORT])).run()
+
+        user_messages = [m for m in stack.context.transcript() if m[0] == "user"]
+        assert any(expected_error in m[1] for m in user_messages), name
