@@ -10,6 +10,7 @@ from awarebench.adapters.base import (
     AdapterError,
     AdapterResponse,
     _normalize_stop_reason,
+    _optional_str,
     _require_attr,
     _require_token,
 )
@@ -60,13 +61,22 @@ class AnthropicAdapter:
         temperature: float = 0.0,
         max_tokens: int | None = None,
     ) -> AdapterResponse:
-        """Run one Messages API call and map the reply onto AdapterResponse."""
+        """Run one Messages API call and map the reply onto AdapterResponse.
+
+        Incoming messages are OpenAI-style (see ModelAdapter); role=="system"
+        entries are lifted out and joined with blank lines into the top-level
+        system parameter the Anthropic API requires.
+        """
         client = self._ensure_client()
+        system_parts = [message["content"] for message in messages if message["role"] == "system"]
+        chat_messages = [message for message in messages if message["role"] != "system"]
         request: dict[str, Any] = {
             "model": self._model,
-            "messages": list(messages),
+            "messages": chat_messages,
             "temperature": temperature,
         }
+        if system_parts:
+            request["system"] = "\n\n".join(system_parts)
         if max_tokens is not None:
             request["max_tokens"] = max_tokens
         try:
@@ -105,4 +115,6 @@ class AnthropicAdapter:
                 _require_attr(usage, "output_tokens"), "usage.output_tokens"
             ),
             stop_reason=_normalize_stop_reason(_require_attr(response, "stop_reason")),
+            model=_optional_str(response, "model"),
+            request_id=_optional_str(response, "id"),
         )

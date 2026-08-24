@@ -10,6 +10,7 @@ from awarebench.adapters.base import (
     AdapterError,
     AdapterResponse,
     _normalize_stop_reason,
+    _optional_str,
     _require_attr,
     _require_token,
 )
@@ -23,9 +24,12 @@ def _import_openai_sdk() -> Any:
 class OpenAIAdapter:
     """Calls client.chat.completions.create and normalizes the reply.
 
-    The vendor SDK is imported only when no client was injected and the first
-    completion runs, so importing this module never pulls the SDK in. Every
-    client failure surfaces as AdapterError; retries are out of scope.
+    Supported model set: chat-completions models that accept
+    max_completion_tokens (current reasoning-family models require it; the
+    legacy max_tokens parameter is deprecated and never sent). The vendor SDK
+    is imported only when no client was injected and the first completion
+    runs, so importing this module never pulls the SDK in. Every client
+    failure surfaces as AdapterError; retries are out of scope.
     """
 
     def __init__(self, model: str, client: Any = None) -> None:
@@ -68,7 +72,7 @@ class OpenAIAdapter:
             "temperature": temperature,
         }
         if max_tokens is not None:
-            request["max_tokens"] = max_tokens
+            request["max_completion_tokens"] = max_tokens
         try:
             response = client.chat.completions.create(**request)
         except AdapterError:
@@ -102,4 +106,6 @@ class OpenAIAdapter:
                 _require_attr(usage, "completion_tokens"), "usage.completion_tokens"
             ),
             stop_reason=_normalize_stop_reason(_require_attr(choice, "finish_reason")),
+            model=_optional_str(response, "model"),
+            request_id=_optional_str(response, "id"),
         )

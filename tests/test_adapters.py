@@ -44,11 +44,15 @@ def _anthropic_response(
     stop_reason: str | None = "end_turn",
     input_tokens: int = 11,
     output_tokens: int = 7,
+    model: str | None = "claude-x",
+    response_id: str | None = "msg_1",
 ) -> Any:
     return SimpleNamespace(
         content=[SimpleNamespace(text=text)],
         usage=SimpleNamespace(input_tokens=input_tokens, output_tokens=output_tokens),
         stop_reason=stop_reason,
+        model=model,
+        id=response_id,
     )
 
 
@@ -57,12 +61,16 @@ def _openai_response(
     finish_reason: str | None = "stop",
     prompt_tokens: int = 11,
     completion_tokens: int = 7,
+    model: str | None = "gpt-x",
+    response_id: str | None = "cmpl_1",
 ) -> Any:
     return SimpleNamespace(
         choices=[
             SimpleNamespace(message=SimpleNamespace(content=text), finish_reason=finish_reason)
         ],
         usage=SimpleNamespace(prompt_tokens=prompt_tokens, completion_tokens=completion_tokens),
+        model=model,
+        id=response_id,
     )
 
 
@@ -110,6 +118,15 @@ def test_stub_rejects_empty_script() -> None:
         StubAdapter([])
 
 
+def test_stub_leaves_model_and_request_id_unset() -> None:
+    adapter = StubAdapter(["x"])
+
+    response = adapter.complete([{"role": "user", "content": "y"}])
+
+    assert response.model is None
+    assert response.request_id is None
+
+
 # --- AdapterResponse validation -----------------------------------------
 
 
@@ -117,6 +134,8 @@ def test_adapter_response_accepts_zero_tokens_and_reasoning_default() -> None:
     response = AdapterResponse(text="ok", prompt_tokens=0, completion_tokens=0, stop_reason="stop")
 
     assert response.reasoning is None
+    assert response.model is None
+    assert response.request_id is None
 
 
 @pytest.mark.parametrize(
@@ -185,6 +204,8 @@ def test_anthropic_maps_fields_exactly() -> None:
         prompt_tokens=11,
         completion_tokens=7,
         stop_reason="end_turn",
+        model="claude-x",
+        request_id="msg_1",
     )
     assert endpoint.calls == [
         {
@@ -215,6 +236,29 @@ def test_anthropic_concatenates_all_text_blocks() -> None:
     result = adapter.complete([{"role": "user", "content": "hi"}])
 
     assert result.text == "first\nsecond"
+
+
+def test_anthropic_lifts_system_messages_to_top_level() -> None:
+    endpoint = _RecordingEndpoint(_anthropic_response())
+    adapter = AnthropicAdapter(model="claude-x", client=SimpleNamespace(messages=endpoint))
+
+    adapter.complete(
+        [
+            {"role": "system", "content": "be terse"},
+            {"role": "user", "content": "hello"},
+            {"role": "system", "content": "never lie"},
+            {"role": "assistant", "content": "hi"},
+            {"role": "user", "content": "go on"},
+        ]
+    )
+
+    call = endpoint.calls[0]
+    assert call["system"] == "be terse\n\nnever lie"
+    assert call["messages"] == [
+        {"role": "user", "content": "hello"},
+        {"role": "assistant", "content": "hi"},
+        {"role": "user", "content": "go on"},
+    ]
 
 
 def test_anthropic_omits_max_tokens_when_not_requested() -> None:
@@ -355,13 +399,15 @@ def test_openai_maps_fields_exactly() -> None:
         prompt_tokens=11,
         completion_tokens=7,
         stop_reason="stop",
+        model="gpt-x",
+        request_id="cmpl_1",
     )
     assert endpoint.calls == [
         {
             "model": "gpt-x",
             "messages": [{"role": "user", "content": "hi"}],
             "temperature": 0.4,
-            "max_tokens": 64,
+            "max_completion_tokens": 64,
         }
     ]
 
@@ -374,6 +420,7 @@ def test_openai_omits_max_tokens_when_not_requested() -> None:
 
     adapter.complete([{"role": "user", "content": "hi"}])
 
+    assert "max_completion_tokens" not in endpoint.calls[0]
     assert "max_tokens" not in endpoint.calls[0]
 
 
@@ -510,3 +557,30 @@ def test_openai_constructs_default_client_lazily(monkeypatch: pytest.MonkeyPatch
 
     assert response.text == "hello"
     assert endpoint.calls[0]["model"] == "gpt-x"
+
+
+def test_mappers_tolerate_missing_model_and_request_id() -> None:
+    bare_anthropic = SimpleNamespace(
+        content=[SimpleNamespace(text="hello")],
+        usage=SimpleNamespace(input_tokens=1, output_tokens=1),
+        stop_reason="end_turn",
+    )
+    bare_openai = SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(content="hello"), finish_reason="stop")],
+        usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1),
+    )
+    anthropic_adapter = AnthropicAdapter(
+        model="m", client=SimpleNamespace(messages=_RecordingEndpoint(bare_anthropic))
+    )
+    openai_adapter = OpenAIAdapter(
+        model="m",
+        client=SimpleNamespace(chat=SimpleNamespace(completions=_RecordingEndpoint(bare_openai))),
+    )
+
+    anthropic_result = anthropic_adapter.complete([])
+    openai_result = openai_adapter.complete([])
+
+    assert anthropic_result.model is None
+    assert anthropic_result.request_id is None
+    assert openai_result.model is None
+    assert openai_result.request_id is None

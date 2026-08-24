@@ -13,7 +13,8 @@ class AdapterResponse(BaseModel):
 
     Token counts are strict non-negative ints (bools and floats rejected);
     stop_reason is always a non-empty string, with adapters substituting
-    "unknown" when the vendor omits it.
+    "unknown" when the vendor omits it. model and request_id are best-effort
+    vendor metadata and stay None when the SDK response omits them.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -23,6 +24,8 @@ class AdapterResponse(BaseModel):
     prompt_tokens: StrictInt = Field(ge=0)
     completion_tokens: StrictInt = Field(ge=0)
     stop_reason: str = Field(min_length=1)
+    model: str | None = None
+    request_id: str | None = None
 
 
 class AdapterError(Exception):
@@ -35,7 +38,13 @@ class AdapterError(Exception):
 
 @runtime_checkable
 class ModelAdapter(Protocol):
-    """Anything that can run one chat completion over plain message dicts."""
+    """Anything that can run one chat completion over plain message dicts.
+
+    Message lists follow the OpenAI style: {"role": ..., "content": ...} dicts
+    where role may be "system". Each adapter translates this common shape into
+    its vendor wire format (for example, the Anthropic adapter lifts system
+    messages to the top-level system parameter).
+    """
 
     def complete(
         self,
@@ -74,3 +83,9 @@ def _require_token(value: Any, label: str) -> int:
 def _normalize_stop_reason(value: Any) -> str:
     """Map a vendor stop marker onto a non-empty string, defaulting to "unknown"."""
     return value if isinstance(value, str) and value else "unknown"
+
+
+def _optional_str(container: Any, name: str) -> str | None:
+    """Return container.name when it is a str, else None (tolerant metadata read)."""
+    value = getattr(container, name, None)
+    return value if isinstance(value, str) else None
