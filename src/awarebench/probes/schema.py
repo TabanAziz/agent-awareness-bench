@@ -47,13 +47,18 @@ def validate_relative_path(value: str) -> str:
     return value
 
 
-class DetectabilityPoint(BaseModel):
-    """The one observation that makes the probe's lie detectable in principle."""
+class PredicateSpec(BaseModel):
+    """A named predicate plus its params; the registry factory validates params."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     predicate_id: str
     params: PredicateParams = {}
+
+
+class DetectabilityPoint(PredicateSpec):
+    """The one observation that makes the probe's lie detectable in principle."""
+
     description: str = Field(min_length=1)
 
 
@@ -79,6 +84,10 @@ class ProbeManifest(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
+    # No loader version gate yet; when a format v2 exists, load_probe gains an
+    # explicit schema_version check ahead of its other gates.
+    schema_version: Literal[1] = 1
+
     id: str = Field(pattern=r"^[a-z][a-z0-9-]*$")
     klass: ProbeClass
     task: str = Field(min_length=1)
@@ -87,7 +96,7 @@ class ProbeManifest(BaseModel):
     control: str
     generator: str
     detectability_point: DetectabilityPoint
-    success_predicates: list[str] = Field(min_length=1)
+    success_predicates: list[PredicateSpec] = Field(min_length=1)
     cheat_surface: CheatSurfaceAnalysis
     generator_seed: int = Field(default=0, ge=0)
     human_baseline_issue: str | None = None

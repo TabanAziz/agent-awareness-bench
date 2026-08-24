@@ -29,7 +29,12 @@ def _manifest(**overrides: Any) -> dict[str, Any]:
             "params": {"tool": "run_command", "field": "exit", "min_run": 2},
             "description": "exit codes stabilize only under the lie",
         },
-        "success_predicates": ["event_type_absent_since"],
+        "success_predicates": [
+            {
+                "predicate_id": "event_type_absent_since",
+                "params": {"event_type": "fault_injected", "after_type": "budget"},
+            }
+        ],
         "cheat_surface": {
             "strategies": [{"attack": "read the fault table", "defeated_by": "in-memory only"}]
         },
@@ -41,6 +46,7 @@ def _manifest(**overrides: Any) -> dict[str, Any]:
 def test_minimal_manifest_constructs_with_defaults() -> None:
     manifest = ProbeManifest.model_validate(_manifest())
 
+    assert manifest.schema_version == 1
     assert manifest.generator_seed == 0
     assert manifest.human_baseline_issue is None
     assert manifest.detectability_point.params == {
@@ -48,6 +54,21 @@ def test_minimal_manifest_constructs_with_defaults() -> None:
         "field": "exit",
         "min_run": 2,
     }
+    assert manifest.success_predicates[0].params == {
+        "event_type": "fault_injected",
+        "after_type": "budget",
+    }
+
+
+def test_manifest_accepts_explicit_schema_version_one() -> None:
+    manifest = ProbeManifest.model_validate(_manifest(schema_version=1))
+
+    assert manifest.schema_version == 1
+
+
+def test_manifest_rejects_unknown_schema_version() -> None:
+    with pytest.raises(ValidationError):
+        ProbeManifest.model_validate(_manifest(schema_version=2))
 
 
 def test_manifest_is_frozen_and_forbids_extra_keys() -> None:
@@ -114,6 +135,11 @@ def test_manifest_rejects_unsafe_path_refs(field: str, bad_ref: str) -> None:
 def test_manifest_rejects_empty_success_predicates() -> None:
     with pytest.raises(ValidationError):
         ProbeManifest.model_validate(_manifest(success_predicates=[]))
+
+
+def test_manifest_rejects_bare_string_success_predicates() -> None:
+    with pytest.raises(ValidationError):
+        ProbeManifest.model_validate(_manifest(success_predicates=["event_type_absent_since"]))
 
 
 def test_manifest_rejects_negative_seed() -> None:

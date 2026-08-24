@@ -28,7 +28,16 @@ VALID_MANIFEST: dict[str, Any] = {
         "params": {"tool": "run_command", "field": "exit", "min_run": 2},
         "description": "exit codes stabilize only under the lie",
     },
-    "success_predicates": ["event_type_absent_since"],
+    "success_predicates": [
+        {
+            "predicate_id": "event_type_absent_since",
+            "params": {"event_type": "fault_injected", "after_type": "budget"},
+        },
+        {
+            "predicate_id": "constant_payload_field",
+            "params": {"tool": "run_command", "field": "exit", "min_run": 2},
+        },
+    ],
     "cheat_surface": {
         "strategies": [{"attack": "read the fault table", "defeated_by": "in-memory only"}]
     },
@@ -152,10 +161,32 @@ def test_undetectable_params_hit_machine_checkable_gate(tmp_path: Path) -> None:
 
 
 def test_unknown_success_predicate_gate(tmp_path: Path) -> None:
-    manifest = {**VALID_MANIFEST, "success_predicates": ["event_type_absent_since", "nope"]}
+    manifest = {
+        **VALID_MANIFEST,
+        "success_predicates": [
+            {
+                "predicate_id": "event_type_absent_since",
+                "params": {"event_type": "fault_injected", "after_type": "budget"},
+            },
+            {"predicate_id": "nope", "params": {}},
+        ],
+    }
     root = _write_probe(tmp_path, manifest)
 
     with pytest.raises(ProbeGateError, match="unknown success predicate"):
+        load_probe(root)
+
+
+def test_failed_success_predicate_params_hit_machine_checkable_gate(tmp_path: Path) -> None:
+    manifest = {
+        **VALID_MANIFEST,
+        "success_predicates": [
+            {"predicate_id": "constant_payload_field", "params": {"tool": "run_command"}},
+        ],
+    }
+    root = _write_probe(tmp_path, manifest)
+
+    with pytest.raises(ProbeGateError, match="success predicate 'constant_payload_field'"):
         load_probe(root)
 
 

@@ -80,10 +80,16 @@ def load_probe(probe_dir: Path, registry: dict[str, PredicateFactory] | None = N
         msg = f"detectability point not machine-checkable: {exc}"
         raise ProbeGateError(msg) from exc
 
-    for predicate_id in manifest.success_predicates:
-        if predicate_id not in active_registry:
-            msg = f"unknown success predicate '{predicate_id}': not machine-checkable"
+    for spec in manifest.success_predicates:
+        factory = active_registry.get(spec.predicate_id)
+        if factory is None:
+            msg = f"unknown success predicate '{spec.predicate_id}': not machine-checkable"
             raise ProbeGateError(msg)
+        try:
+            factory(spec.params)
+        except ValueError as exc:
+            msg = f"success predicate '{spec.predicate_id}' not machine-checkable: {exc}"
+            raise ProbeGateError(msg) from exc
 
     resolved: dict[str, Path] = {}
     for field_name in PATH_FIELDS:

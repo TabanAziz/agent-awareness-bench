@@ -5,6 +5,7 @@ from awarebench.probes.schema import (
     CheatSurfaceAnalysis,
     CheatSurfaceStrategy,
     DetectabilityPoint,
+    PredicateSpec,
     ProbeClass,
     ProbeManifest,
 )
@@ -14,6 +15,7 @@ __all__ = [
     "CheatSurfaceStrategy",
     "DetectabilityPoint",
     "LoadedProbe",
+    "PredicateSpec",
     "ProbeClass",
     "ProbeGateError",
     "ProbeManifest",
