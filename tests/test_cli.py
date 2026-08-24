@@ -72,7 +72,18 @@ def test_run_with_stub_script_writes_events_and_report(
     script = _write_stub_script(tmp_path)
     out = tmp_path / "runs"
 
-    exit_code = cli.main(["run", str(probe_dir), "--stub-script", str(script), "--out", str(out)])
+    exit_code = cli.main(
+        [
+            "run",
+            str(probe_dir),
+            "--stub-script",
+            str(script),
+            "--max-tokens",
+            "512",
+            "--out",
+            str(out),
+        ]
+    )
 
     assert exit_code == 0
     run_dir = out / "cli-probe" / "stub-s0"
@@ -109,6 +120,55 @@ def test_missing_probe_dir_exits_two_with_gate_message(
     assert exit_code == 2
     assert "probe rejected" in captured.err
     assert "missing manifest" in captured.err
+
+
+def test_missing_stub_script_is_usage_error(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    probe_dir = _make_probe(tmp_path)
+
+    exit_code = cli.main(
+        [
+            "run",
+            str(probe_dir),
+            "--stub-script",
+            str(tmp_path / "no-such-script.jsonl"),
+            "--out",
+            str(tmp_path / "runs"),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 2
+    assert "--stub-script not found" in captured.err
+
+
+@pytest.mark.parametrize("backend", ["anthropic", "openai"])
+def test_vendor_model_without_model_name_is_usage_error(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], backend: str
+) -> None:
+    exit_code = cli.main(
+        ["run", str(tmp_path / "probe"), "--model", backend, "--out", str(tmp_path / "runs")]
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 2
+    assert "--model-name is required" in captured.err
+
+
+def test_unexpected_error_exits_three_with_traceback(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def explode(probe_dir: Path) -> None:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(cli, "load_probe", explode)
+
+    exit_code = cli.main(["run", str(tmp_path / "probe"), "--out", str(tmp_path / "runs")])
+
+    captured = capsys.readouterr()
+    assert exit_code == 3
+    assert "RuntimeError: boom" in captured.err
 
 
 @pytest.mark.skipif(

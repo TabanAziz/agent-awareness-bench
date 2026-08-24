@@ -46,6 +46,12 @@ def main(argv: list[str] | None = None) -> int:
     run_parser.add_argument("--model-name", default=None, help="Model id for vendor adapters.")
     run_parser.add_argument("--seed", type=int, default=0)
     run_parser.add_argument("--max-cycles", type=int, default=40)
+    run_parser.add_argument(
+        "--max-tokens",
+        type=int,
+        default=2048,
+        help="Maximum completion tokens requested per model call.",
+    )
     run_parser.add_argument("--out", type=Path, default=Path("runs"))
     run_parser.add_argument(
         "--stub-script",
@@ -70,6 +76,9 @@ def main(argv: list[str] | None = None) -> int:
 def _run_command(args: argparse.Namespace) -> int:
     if args.model != "stub" and not args.model_name:
         print(f"--model-name is required for --model {args.model}", file=sys.stderr)
+        return 2
+    if args.stub_script is not None and not args.stub_script.is_file():
+        print(f"--stub-script not found: {args.stub_script}", file=sys.stderr)
         return 2
 
     loaded = load_probe(args.probe_dir)
@@ -101,6 +110,7 @@ def _run_command(args: argparse.Namespace) -> int:
         clock=clock,
         cycles=cycles,
         max_cycles=args.max_cycles,
+        max_completion_tokens=args.max_tokens,
     ).run()
 
     snapshot = budget.snapshot()
