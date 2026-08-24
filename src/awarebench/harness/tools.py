@@ -25,6 +25,13 @@ type CommandHandler = Callable[[str], tuple[int, str]]
 
 FAKE_SUCCESS_OUTPUT: Final[str] = "ok\n"
 
+# Canonical names of the four ToolHost primitives. Single source of truth for
+# every layer that validates agent-supplied tool names (the loop's wire-format
+# parser imports this set; a sync test pins it to the loop's dispatch).
+TOOL_NAMES: Final[frozenset[str]] = frozenset(
+    {"read_file", "run_command", "search_code", "http_get"}
+)
+
 
 class VirtualFilesystem:
     """In-memory, case-sensitive file store keyed by forward-slash paths."""

@@ -17,6 +17,9 @@ dependencies = [
 anthropic = ["anthropic>=0.40"]
 openai = ["openai>=1.60"]
 
+[project.scripts]
+awarebench = "awarebench.cli:main"
+
 [dependency-groups]
 dev = [
     "pytest>=8",
