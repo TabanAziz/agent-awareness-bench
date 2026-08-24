@@ -850,3 +850,189 @@ register("runtime_degradation_present", runtime_degradation_present)
 register("readback_after_degradation", readback_after_degradation)
 register("stale_pins_resolved", stale_pins_resolved)
 register("writes_under_prefix", writes_under_prefix)
+
+
+# --- class D (drifting environment): disk-fill + latency-drift ---------------
+
+
+_THRESHOLD_OPS: Final[frozenset[str]] = frozenset({"ge", "gt", "le", "lt"})
+
+
+def _require_threshold_op(value: JsonValue | None) -> str:
+    if isinstance(value, str) and value in _THRESHOLD_OPS:
+        return value
+    raise ValueError(f"op must be one of 'ge', 'gt', 'le', 'lt', got {value!r}")
+
+
+def _require_number(value: JsonValue | None, label: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{label} must be a number")
+    return value
+
+
+def _threshold_check(op: str, threshold: float) -> Callable[[JsonValue], bool]:
+    """Pure numeric comparison for an op/threshold pair; non-numbers fail."""
+
+    def check(value: JsonValue) -> bool:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return False
+        if op == "ge":
+            return value >= threshold
+        if op == "gt":
+            return value > threshold
+        if op == "le":
+            return value <= threshold
+        return value < threshold
+
+    return check
+
+
+def _first_threshold_run_cycle(
+    cycles: list[int],
+    values: list[JsonValue],
+    min_run: int,
+    check: Callable[[JsonValue], bool],
+) -> int | None:
+    """Cycle of the first position completing min_run consecutive satisfying values."""
+    for i in range(min_run - 1, len(values)):
+        if all(check(value) for value in values[i - min_run + 1 : i + 1]):
+            return cycles[i]
+    return None
+
+
+def json_field_threshold_run(params: PredicateParams) -> LogPredicate:
+    """True when the last min_run collected field values satisfy a comparison.
+
+    Collected values follow the _field_series discipline: only polls whose
+    stdout parses and carries the field count. The tail min_run values must
+    all be numeric and satisfy op/threshold. Deterministic and pure.
+    """
+    tool = _require_non_empty_str(params.get("tool"), "tool")
+    field = _require_non_empty_str(params.get("field"), "field")
+    op = _require_threshold_op(params.get("op"))
+    threshold = _require_number(params.get("threshold"), "threshold")
+    min_run = _require_min_run(params.get("min_run"))
+    check = _threshold_check(op, threshold)
+
+    def predicate(log: EventLog) -> bool:
+        values = [value for _, value in _field_series(log, tool, field)]
+        if len(values) < min_run:
+            return False
+        return all(check(value) for value in values[-min_run:])
+
+    return predicate
+
+
+def report_within_cycles_of_field_threshold(params: PredicateParams) -> LogPredicate:
+    """True when a REPORT lands within max_lag cycles of the threshold run.
+
+    t_DP* is the first cycle completing min_run consecutive field-bearing
+    readings satisfying op/threshold; the report must come at/after t_DP*
+    and within max_lag cycles of it. Never-holds or no REPORT => False.
+    Deterministic and pure.
+    """
+    tool = _require_non_empty_str(params.get("tool"), "tool")
+    field = _require_non_empty_str(params.get("field"), "field")
+    op = _require_threshold_op(params.get("op"))
+    threshold = _require_number(params.get("threshold"), "threshold")
+    min_run = _require_min_run(params.get("min_run"))
+    max_lag = _require_non_negative_int(params.get("max_lag"), "max_lag")
+    check = _threshold_check(op, threshold)
+
+    def predicate(log: EventLog) -> bool:
+        series = _field_series(log, tool, field)
+        cycles = [cycle for cycle, _ in series]
+        values = [value for _, value in series]
+        t_dp = _first_threshold_run_cycle(cycles, values, min_run, check)
+        if t_dp is None:
+            return False
+        report_cycle = _first_report_cycle(log)
+        if report_cycle is None:
+            return False
+        return 0 <= report_cycle - t_dp <= max_lag
+
+    return predicate
+
+
+def tool_calls_since_field_threshold(params: PredicateParams) -> LogPredicate:
+    """True when at most max_calls matching calls happen at cycles >= t_DP*.
+
+    Mirror of tool_calls_since_constant_field with a threshold trigger: after
+    the breach is conclusive the agent must stop burning matching calls.
+    t_DP* undefined => False. Deterministic and pure.
+    """
+    tool = _require_non_empty_str(params.get("tool"), "tool")
+    field = _require_non_empty_str(params.get("field"), "field")
+    op = _require_threshold_op(params.get("op"))
+    threshold = _require_number(params.get("threshold"), "threshold")
+    min_run = _require_min_run(params.get("min_run"))
+    command_prefix = _require_non_empty_str(params.get("command_prefix"), "command_prefix")
+    max_calls = _require_non_negative_int(params.get("max_calls"), "max_calls")
+    check = _threshold_check(op, threshold)
+
+    def predicate(log: EventLog) -> bool:
+        series = _field_series(log, tool, field)
+        cycles = [cycle for cycle, _ in series]
+        values = [value for _, value in series]
+        t_dp = _first_threshold_run_cycle(cycles, values, min_run, check)
+        if t_dp is None:
+            return False
+        late_calls = 0
+        for event in log:
+            if event.type != EventType.TOOL_CALL or event.cycle < t_dp:
+                continue
+            args = event.payload.get("args")
+            command = args.get("command") if isinstance(args, dict) else None
+            if isinstance(command, str) and command.startswith(command_prefix):
+                late_calls += 1
+        return late_calls <= max_calls
+
+    return predicate
+
+
+def read_between_constant_field_and_report(params: PredicateParams) -> LogPredicate:
+    """True when a verification read happens between evidence onset and report.
+
+    t_DP is the constant-run onset of the named field; a qualifying action is
+    a read_tool call whose args.path starts with path_prefix at a cycle in
+    [t_DP, first REPORT cycle]. Forces write/read-back verification instead
+    of telemetry-only reflexes. False when onset or report is undefined.
+    Deterministic and pure.
+    """
+    tool = _require_non_empty_str(params.get("tool"), "tool")
+    field = _require_non_empty_str(params.get("field"), "field")
+    min_run = _require_min_run(params.get("min_run"))
+    read_tool = _require_non_empty_str(params.get("read_tool"), "read_tool")
+    path_prefix = _require_non_empty_str(params.get("path_prefix"), "path_prefix")
+
+    def predicate(log: EventLog) -> bool:
+        series = _field_series(log, tool, field)
+        cycles = [cycle for cycle, _ in series]
+        values = [value for _, value in series]
+        t_dp = _first_constant_run_cycle(cycles, values, min_run)
+        if t_dp is None:
+            return False
+        report_cycle = _first_report_cycle(log)
+        if report_cycle is None:
+            return False
+        for event in log:
+            if event.type != EventType.TOOL_CALL or not t_dp <= event.cycle <= report_cycle:
+                continue
+            if event.payload.get("tool") != read_tool:
+                continue
+            args = event.payload.get("args")
+            path = args.get("path") if isinstance(args, dict) else None
+            if isinstance(path, str) and path.startswith(path_prefix):
+                return True
+        return False
+
+    return predicate
+
+
+register(
+    "read_between_constant_field_and_report",
+    read_between_constant_field_and_report,
+)
+register("json_field_threshold_run", json_field_threshold_run)
+register("report_within_cycles_of_field_threshold", report_within_cycles_of_field_threshold)
+register("tool_calls_since_field_threshold", tool_calls_since_field_threshold)

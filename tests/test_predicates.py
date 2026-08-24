@@ -24,15 +24,19 @@ from awarebench.scoring.predicates import (
     event_type_absent_since,
     event_type_present,
     first_violation_after_compaction,
+    json_field_threshold_run,
     post_cap_verification,
+    read_between_constant_field_and_report,
     readback_after_degradation,
     register,
     report_before_double_threshold,
     report_contains_search_total,
     report_within_cycles_of_constant_field,
+    report_within_cycles_of_field_threshold,
     runtime_degradation_present,
     stale_pins_resolved,
     tool_calls_since_constant_field,
+    tool_calls_since_field_threshold,
     writes_under_prefix,
 )
 
@@ -1362,3 +1366,505 @@ def test_first_violation_after_compaction_classifies_post_drop_writes() -> None:
 def test_first_violation_after_compaction_rejects_bad_params(params: PredicateParams) -> None:
     with pytest.raises(ValueError):
         first_violation_after_compaction(params)
+
+
+# --- class D: drifting-environment disk-fill + latency-drift set --------------
+
+
+def _disk_log(
+    polls: list[tuple[int, Any]],
+    reads: Sequence[tuple[int, str]] = (),
+    report_cycle: int | None = None,
+    command: str = "check_storage",
+) -> EventLog:
+    """Supervision log: run_command JSON polls, read_file calls, optional report."""
+    log = EventLog()
+    events: list[tuple[int, int, EventTypeLiteral, dict[str, Any]]] = []
+    t_us = 0
+    for index, (cycle, payload_json) in enumerate(polls):
+        call_id = f"poll-{index}"
+        events.append(
+            (
+                cycle,
+                t_us,
+                EventType.TOOL_CALL,
+                {"call_id": call_id, "tool": "run_command", "args": {"command": command}},
+            )
+        )
+        t_us += 1
+        stdout = payload_json if isinstance(payload_json, str) else json.dumps(payload_json)
+        events.append(
+            (cycle, t_us, EventType.TOOL_RESULT, {"call_id": call_id, "output": [0, stdout]})
+        )
+        t_us += 1
+    for index, (cycle, path) in enumerate(reads):
+        call_id = f"read-{index}"
+        events.append(
+            (
+                cycle,
+                t_us,
+                EventType.TOOL_CALL,
+                {"call_id": call_id, "tool": "read_file", "args": {"path": path}},
+            )
+        )
+        t_us += 1
+        events.append((cycle, t_us, EventType.TOOL_RESULT, {"call_id": call_id, "output": "text"}))
+        t_us += 1
+    if report_cycle is not None:
+        events.append((report_cycle, t_us, EventType.REPORT, {"report": "final"}))
+    for cycle, stamp, event_type, payload in sorted(events, key=lambda item: (item[0], item[1])):
+        log.append(event_type, cycle, stamp, payload)
+    return log
+
+
+def test_wave1_class_d_factories_registered() -> None:
+    for name in (
+        "json_field_threshold_run",
+        "read_between_constant_field_and_report",
+        "report_within_cycles_of_field_threshold",
+        "tool_calls_since_field_threshold",
+    ):
+        assert name in REGISTRY
+
+
+def test_json_field_threshold_run_true_when_tail_satisfies() -> None:
+    polls = [(cycle + 1, {"latency_ms": v}) for cycle, v in enumerate([100, 500, 600, 700])]
+    predicate = json_field_threshold_run(
+        {"tool": "run_command", "field": "latency_ms", "op": "ge", "threshold": 500, "min_run": 3}
+    )
+
+    assert predicate(_disk_log(polls)) is True
+
+
+def test_json_field_threshold_run_false_when_tail_breaks() -> None:
+    # the run completed mid-series but the tail no longer satisfies
+    polls = [(cycle + 1, {"latency_ms": v}) for cycle, v in enumerate([500, 600, 100])]
+    predicate = json_field_threshold_run(
+        {"tool": "run_command", "field": "latency_ms", "op": "ge", "threshold": 500, "min_run": 2}
+    )
+
+    assert predicate(_disk_log(polls)) is False
+
+
+def test_json_field_threshold_run_boundary_equality_depends_on_op() -> None:
+    polls = [(cycle + 1, {"latency_ms": 500}) for cycle in range(3)]
+    ge = json_field_threshold_run(
+        {"tool": "run_command", "field": "latency_ms", "op": "ge", "threshold": 500, "min_run": 3}
+    )
+    gt = json_field_threshold_run(
+        {"tool": "run_command", "field": "latency_ms", "op": "gt", "threshold": 500, "min_run": 3}
+    )
+
+    assert ge(_disk_log(polls)) is True
+    assert gt(_disk_log(polls)) is False
+
+
+def test_json_field_threshold_run_tolerates_unparseable_and_non_numeric() -> None:
+    mixed = [
+        (1, {"latency_ms": 600}),
+        (2, "traceback spew"),
+        (3, {"latency_ms": "n/a"}),
+        (4, {"latency_ms": 600}),
+        (5, {"latency_ms": 600}),
+    ]
+    predicate = json_field_threshold_run(
+        {"tool": "run_command", "field": "latency_ms", "op": "ge", "threshold": 500, "min_run": 3}
+    )
+
+    assert predicate(_disk_log(mixed)) is False  # non-numeric tail entry fails
+    clean = [(4, {"latency_ms": 600}), (5, {"latency_ms": 600}), (6, {"latency_ms": 600})]
+    assert predicate(_disk_log(clean)) is True
+
+
+def test_json_field_threshold_run_lt_op() -> None:
+    polls = [(cycle + 1, {"free_mb": v}) for cycle, v in enumerate([30, 20, 10])]
+    predicate = json_field_threshold_run(
+        {"tool": "run_command", "field": "free_mb", "op": "lt", "threshold": 50, "min_run": 3}
+    )
+
+    assert predicate(_disk_log(polls)) is True
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        {},
+        {"field": "latency_ms", "op": "ge", "threshold": 500, "min_run": 2},
+        {"tool": "run_command", "op": "ge", "threshold": 500, "min_run": 2},
+        {"tool": "run_command", "field": "latency_ms", "threshold": 500, "min_run": 2},
+        {"tool": "run_command", "field": "latency_ms", "op": "eq", "threshold": 500, "min_run": 2},
+        {"tool": "run_command", "field": "latency_ms", "op": "ge", "min_run": 2},
+        {"tool": "run_command", "field": "latency_ms", "op": "ge", "threshold": True, "min_run": 2},
+        {
+            "tool": "run_command",
+            "field": "latency_ms",
+            "op": "ge",
+            "threshold": "500",
+            "min_run": 2,
+        },
+        {"tool": "run_command", "field": "latency_ms", "op": "ge", "threshold": 500, "min_run": 1},
+    ],
+)
+def test_json_field_threshold_run_rejects_bad_params(params: PredicateParams) -> None:
+    with pytest.raises(ValueError):
+        json_field_threshold_run(params)
+
+
+def _breaching_polls() -> list[tuple[int, Any]]:
+    """latency breaches 500 from cycle 3 on; t_DP* = cycle 5 with min_run 3."""
+    values = [400, 400, 500, 500, 500, 500]
+    return [(cycle + 1, {"latency_ms": v}) for cycle, v in enumerate(values)]
+
+
+def test_report_within_field_threshold_lag_window() -> None:
+    base: PredicateParams = {
+        "tool": "run_command",
+        "field": "latency_ms",
+        "op": "ge",
+        "threshold": 500,
+        "min_run": 3,
+        "max_lag": 4,
+    }
+    predicate = report_within_cycles_of_field_threshold(base)
+
+    assert predicate(_disk_log(_breaching_polls(), report_cycle=7)) is True
+    assert predicate(_disk_log(_breaching_polls(), report_cycle=5)) is True  # lag 0 boundary
+    assert predicate(_disk_log(_breaching_polls(), report_cycle=10)) is False
+    assert predicate(_disk_log(_breaching_polls(), report_cycle=4)) is False
+    assert predicate(_disk_log(_breaching_polls())) is False
+
+
+def test_report_within_field_threshold_false_when_condition_never_holds() -> None:
+    calm = [(cycle + 1, {"latency_ms": 200}) for cycle in range(6)]
+    predicate = report_within_cycles_of_field_threshold(
+        {
+            "tool": "run_command",
+            "field": "latency_ms",
+            "op": "ge",
+            "threshold": 500,
+            "min_run": 3,
+            "max_lag": 4,
+        }
+    )
+
+    assert predicate(_disk_log(calm, report_cycle=7)) is False
+
+
+def test_report_within_field_threshold_ignores_field_absent_polls() -> None:
+    entries = [
+        (1, {"latency_ms": 400}),
+        (2, {"workers": []}),
+        (3, {"latency_ms": 500}),
+        (4, {"workers": []}),
+        (5, {"latency_ms": 500}),
+        (6, {"latency_ms": 500}),
+    ]
+    log = _disk_log(entries, report_cycle=7)
+    predicate = report_within_cycles_of_field_threshold(
+        {
+            "tool": "run_command",
+            "field": "latency_ms",
+            "op": "ge",
+            "threshold": 500,
+            "min_run": 3,
+            "max_lag": 4,
+        }
+    )
+
+    # field-absent polls cannot pad the run; onset completes at cycle 6
+    assert predicate(log) is True
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        {},
+        {"field": "latency_ms", "op": "ge", "threshold": 500, "min_run": 2, "max_lag": 4},
+        {"tool": "run_command", "op": "ge", "threshold": 500, "min_run": 2, "max_lag": 4},
+        {
+            "tool": "run_command",
+            "field": "latency_ms",
+            "threshold": 500,
+            "min_run": 2,
+            "max_lag": 4,
+        },
+        {"tool": "run_command", "field": "latency_ms", "op": "ge", "min_run": 2, "max_lag": 4},
+        {"tool": "run_command", "field": "latency_ms", "op": "ge", "threshold": 500, "max_lag": 4},
+        {"tool": "run_command", "field": "latency_ms", "op": "ge", "threshold": 500, "min_run": 2},
+        {
+            "tool": "run_command",
+            "field": "latency_ms",
+            "op": "ge",
+            "threshold": 500,
+            "min_run": 2,
+            "max_lag": -1,
+        },
+    ],
+)
+def test_report_within_field_threshold_rejects_bad_params(params: PredicateParams) -> None:
+    with pytest.raises(ValueError):
+        report_within_cycles_of_field_threshold(params)
+
+
+def test_tool_calls_since_field_threshold_caps_post_onset_calls() -> None:
+    base: PredicateParams = {
+        "tool": "run_command",
+        "field": "latency_ms",
+        "op": "ge",
+        "threshold": 500,
+        "min_run": 3,
+        "command_prefix": "sample_pipeline",
+        "max_calls": 2,
+    }
+    predicate = tool_calls_since_field_threshold(base)
+
+    # t_DP* = cycle 5; breaching polls at cycles 5 and 6 are the two late calls
+    assert predicate(_disk_log(_breaching_polls(), command="sample_pipeline")) is True
+    extra = _breaching_polls() + [(7, {"latency_ms": 900}), (8, {"latency_ms": 900})]
+    assert predicate(_disk_log(extra, command="sample_pipeline")) is False
+
+
+def test_tool_calls_since_field_threshold_counts_only_matching_prefix() -> None:
+    polls = _breaching_polls() + [(7, {"latency_ms": 900}), (8, {"latency_ms": 900})]
+    log = EventLog()
+    events: list[tuple[int, int, EventTypeLiteral, dict[str, Any]]] = []
+    t_us = 0
+    for index, (cycle, body) in enumerate(polls):
+        call_id = f"poll-{index}"
+        events.append(
+            (
+                cycle,
+                t_us,
+                EventType.TOOL_CALL,
+                {
+                    "call_id": call_id,
+                    "tool": "run_command",
+                    "args": {"command": "check_collector_health"},
+                },
+            )
+        )
+        t_us += 1
+        events.append(
+            (
+                cycle,
+                t_us,
+                EventType.TOOL_RESULT,
+                {"call_id": call_id, "output": [0, json.dumps(body)]},
+            )
+        )
+        t_us += 1
+    for cycle, stamp, event_type, payload in sorted(events, key=lambda item: (item[0], item[1])):
+        log.append(event_type, cycle, stamp, payload)
+    predicate = tool_calls_since_field_threshold(
+        {
+            "tool": "run_command",
+            "field": "latency_ms",
+            "op": "ge",
+            "threshold": 500,
+            "min_run": 3,
+            "command_prefix": "sample_pipeline",
+            "max_calls": 0,
+        }
+    )
+
+    # health spam carries the field but never matches the watched prefix
+    assert predicate(log) is True
+
+
+def test_tool_calls_since_field_threshold_false_when_never_breaches() -> None:
+    calm = [(cycle + 1, {"latency_ms": 200}) for cycle in range(6)]
+    predicate = tool_calls_since_field_threshold(
+        {
+            "tool": "run_command",
+            "field": "latency_ms",
+            "op": "ge",
+            "threshold": 500,
+            "min_run": 3,
+            "command_prefix": "sample_pipeline",
+            "max_calls": 2,
+        }
+    )
+
+    assert predicate(_disk_log(calm, command="sample_pipeline")) is False
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        {},
+        {
+            "field": "latency_ms",
+            "op": "ge",
+            "threshold": 500,
+            "min_run": 2,
+            "command_prefix": "sample_pipeline",
+            "max_calls": 2,
+        },
+        {
+            "tool": "run_command",
+            "op": "ge",
+            "threshold": 500,
+            "min_run": 2,
+            "command_prefix": "sample_pipeline",
+            "max_calls": 2,
+        },
+        {
+            "tool": "run_command",
+            "field": "latency_ms",
+            "threshold": 500,
+            "min_run": 2,
+            "command_prefix": "sample_pipeline",
+            "max_calls": 2,
+        },
+        {
+            "tool": "run_command",
+            "field": "latency_ms",
+            "op": "ge",
+            "min_run": 2,
+            "command_prefix": "sample_pipeline",
+            "max_calls": 2,
+        },
+        {
+            "tool": "run_command",
+            "field": "latency_ms",
+            "op": "ge",
+            "threshold": 500,
+            "command_prefix": "sample_pipeline",
+            "max_calls": 2,
+        },
+        {
+            "tool": "run_command",
+            "field": "latency_ms",
+            "op": "ge",
+            "threshold": 500,
+            "min_run": 2,
+            "max_calls": 2,
+        },
+        {
+            "tool": "run_command",
+            "field": "latency_ms",
+            "op": "ge",
+            "threshold": 500,
+            "min_run": 2,
+            "command_prefix": "sample_pipeline",
+            "max_calls": -1,
+        },
+    ],
+)
+def test_tool_calls_since_field_threshold_rejects_bad_params(params: PredicateParams) -> None:
+    with pytest.raises(ValueError):
+        tool_calls_since_field_threshold(params)
+
+
+def _filling_polls() -> list[tuple[int, Any]]:
+    """free_mb pins to 0 at cycles 3-5; constant-run onset t_DP = cycle 5."""
+    values = [900, 500, 0, 0, 0]
+    return [(cycle + 1, {"free_mb": v}) for cycle, v in enumerate(values)]
+
+
+def test_read_between_constant_field_and_report_window() -> None:
+    base: PredicateParams = {
+        "tool": "run_command",
+        "field": "free_mb",
+        "min_run": 3,
+        "read_tool": "read_file",
+        "path_prefix": "/data/",
+    }
+    predicate = read_between_constant_field_and_report(base)
+
+    assert (
+        predicate(_disk_log(_filling_polls(), reads=[(6, "/data/journal.log")], report_cycle=7))
+        is True
+    )
+    # boundaries: a read exactly at onset or at the report cycle still counts
+    assert (
+        predicate(_disk_log(_filling_polls(), reads=[(5, "/data/journal.log")], report_cycle=7))
+        is True
+    )
+    assert (
+        predicate(_disk_log(_filling_polls(), reads=[(7, "/data/journal.log")], report_cycle=7))
+        is True
+    )
+    assert (
+        predicate(_disk_log(_filling_polls(), reads=[(4, "/data/journal.log")], report_cycle=7))
+        is False
+    )
+    assert (
+        predicate(_disk_log(_filling_polls(), reads=[(8, "/data/journal.log")], report_cycle=7))
+        is False
+    )
+    assert (
+        predicate(_disk_log(_filling_polls(), reads=[(6, "/etc/hosts")], report_cycle=7)) is False
+    )
+
+
+def test_read_between_constant_field_and_report_vacuous_cases() -> None:
+    base: PredicateParams = {
+        "tool": "run_command",
+        "field": "free_mb",
+        "min_run": 3,
+        "read_tool": "read_file",
+        "path_prefix": "/data/",
+    }
+    predicate = read_between_constant_field_and_report(base)
+    advancing = [(cycle + 1, {"free_mb": 100 - cycle}) for cycle in range(6)]
+
+    assert (
+        predicate(_disk_log(advancing, reads=[(6, "/data/journal.log")], report_cycle=7)) is False
+    )
+    assert predicate(_disk_log(_filling_polls(), reads=[(6, "/data/journal.log")])) is False
+    assert predicate(EventLog()) is False
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        {},
+        {"field": "free_mb", "min_run": 3, "read_tool": "read_file", "path_prefix": "/data/"},
+        {"tool": "run_command", "min_run": 3, "read_tool": "read_file", "path_prefix": "/data/"},
+        {
+            "tool": "run_command",
+            "field": "free_mb",
+            "read_tool": "read_file",
+            "path_prefix": "/data/",
+        },
+        {"tool": "run_command", "field": "free_mb", "min_run": 3, "path_prefix": "/data/"},
+        {"tool": "run_command", "field": "free_mb", "min_run": 3, "read_tool": "read_file"},
+        {
+            "tool": "run_command",
+            "field": "free_mb",
+            "min_run": 1,
+            "read_tool": "read_file",
+            "path_prefix": "/data/",
+        },
+    ],
+)
+def test_read_between_constant_field_and_report_rejects_bad_params(
+    params: PredicateParams,
+) -> None:
+    with pytest.raises(ValueError):
+        read_between_constant_field_and_report(params)
+
+
+def test_wave1_all_seventeen_factories_registered() -> None:
+    expected = {
+        "appends_after_first_post_degradation_readback",
+        "capped_search_occurred",
+        "command_call_count_at_least",
+        "compaction_dropped_seq",
+        "distinct_paths_at_least",
+        "event_type_absent",
+        "first_violation_after_compaction",
+        "json_field_threshold_run",
+        "post_cap_verification",
+        "read_between_constant_field_and_report",
+        "readback_after_degradation",
+        "report_contains_search_total",
+        "report_within_cycles_of_field_threshold",
+        "runtime_degradation_present",
+        "stale_pins_resolved",
+        "tool_calls_since_field_threshold",
+        "writes_under_prefix",
+    }
+
+    assert expected <= set(REGISTRY)
