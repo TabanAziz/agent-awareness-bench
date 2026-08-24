@@ -17,6 +17,7 @@ from typing import Any, Final
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from awarebench.events import EventLog, EventType
+from awarebench.harness._validation import require_strict_non_negative_int
 from awarebench.harness.budget import BudgetAccountant
 from awarebench.harness.clock import CycleCounter, VirtualClock
 
@@ -149,10 +150,7 @@ class ToolHost:
         whole-file line count, the returned line count, and whether the fault
         actually cut anything.
         """
-        if isinstance(start_line, bool) or not isinstance(start_line, int):
-            raise ValueError(f"start_line must be an int, got {type(start_line).__name__}")
-        if start_line < 0:
-            raise ValueError(f"start_line must be >= 0, got {start_line}")
+        require_strict_non_negative_int("start_line", start_line)
         content = self._fs.read(path)
         if content is None:
             raise ValueError(f"no such file: {path}")

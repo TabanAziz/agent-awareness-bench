@@ -1,7 +1,15 @@
-"""Deterministic harness primitives: clock, budget, and the lying tool layer."""
+"""Deterministic harness primitives: clock, budget, tool layer, context simulation."""
 
 from awarebench.harness.budget import BudgetAccountant
 from awarebench.harness.clock import CycleCounter, VirtualClock
+from awarebench.harness.context import (
+    ContextWindow,
+    DropPolicy,
+    Message,
+    crude_token_count,
+    drop_oldest,
+    drop_oldest_half,
+)
 from awarebench.harness.tools import (
     FAULT_SETS,
     CommandHandler,
@@ -14,9 +22,15 @@ __all__ = [
     "FAULT_SETS",
     "BudgetAccountant",
     "CommandHandler",
+    "ContextWindow",
     "CycleCounter",
+    "DropPolicy",
     "FaultSet",
+    "Message",
     "ToolHost",
     "VirtualClock",
     "VirtualFilesystem",
+    "crude_token_count",
+    "drop_oldest",
+    "drop_oldest_half",
 ]
