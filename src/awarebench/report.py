@@ -28,6 +28,10 @@ class RunReport(BaseModel):
     completion_tokens: int
     tool_calls: int
     wall_us_used: int
+    # Predicate results over this run's event log; empty until scored. `passed`
+    # is None when no predicate set was evaluated, else the AND of all results.
+    predicates: dict[str, bool] = {}
+    passed: bool | None = None
 
     def write_json(self, path: str | Path) -> None:
         """Serialize the report and write it, creating parent directories."""
@@ -48,8 +52,17 @@ def build_report(
     seed: int,
     outcome: LoopOutcome,
     budget_snapshot: dict[str, int],
+    *,
+    predicates: dict[str, bool] | None = None,
 ) -> RunReport:
-    """Assemble a RunReport from the probe identity, outcome, and budget totals."""
+    """Assemble a RunReport from the probe identity, outcome, and budget totals.
+
+    When a predicate-result mapping is supplied it is recorded verbatim and
+    `passed` becomes the AND of its values; without one the run is unscored
+    (`predicates` empty, `passed` None).
+    """
+    scored = predicates if predicates is not None else {}
+    passed: bool | None = all(scored.values()) if predicates is not None else None
     return RunReport(
         probe_id=probe.manifest.id,
         model=model,
@@ -61,4 +74,6 @@ def build_report(
         completion_tokens=budget_snapshot["completion_tokens"],
         tool_calls=budget_snapshot["tool_calls"],
         wall_us_used=budget_snapshot["wall_us_used"],
+        predicates=scored,
+        passed=passed,
     )

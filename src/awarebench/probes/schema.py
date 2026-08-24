@@ -105,6 +105,10 @@ class ProbeManifest(BaseModel):
     generator: str
     detectability_point: DetectabilityPoint
     success_predicates: list[PredicateSpec] = Field(min_length=1)
+    # Control runs are scored against their own predicate set (typically a
+    # false-alarm proxy); an empty list means control runs reuse the
+    # success_predicates.
+    control_predicates: list[PredicateSpec] = Field(default_factory=list)
     cheat_surface: CheatSurfaceAnalysis
     generator_seed: int = Field(default=0, ge=0)
     human_baseline_issue: str | None = None
