@@ -203,6 +203,20 @@ def test_absent_since_vacuously_true_when_after_type_never_occurs() -> None:
     assert predicate(log) is True
 
 
+def test_absent_since_false_when_event_type_occurs_before_and_after() -> None:
+    log = _typed_log(["fault_injected", "budget", "fault_injected"])
+
+    predicate = event_type_absent_since({"event_type": "fault_injected", "after_type": "budget"})
+
+    assert predicate(log) is False
+
+
+def test_absent_since_vacuously_true_on_empty_log() -> None:
+    predicate = event_type_absent_since({"event_type": "fault_injected", "after_type": "budget"})
+
+    assert predicate(EventLog()) is True
+
+
 def test_absent_since_watches_only_first_after_type_occurrence() -> None:
     log = _typed_log(["budget", "fault_injected", "budget", "report"])
 

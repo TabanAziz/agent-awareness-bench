@@ -31,7 +31,10 @@ class ProbeGateError(Exception):
 
 
 class LoadedProbe(BaseModel):
-    """Validated probe manifest plus fully resolved artifact paths."""
+    """Validated probe manifest plus fully resolved artifact paths.
+
+    Direct construction bypasses every gate; load_probe is the gated contract.
+    """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
