@@ -118,8 +118,8 @@ def _load_raw_manifest(root: Path) -> dict[str, Any]:
         raise ProbeGateError(msg)
     try:
         raw = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
-    except yaml.YAMLError as exc:
-        msg = f"missing manifest: probe.yaml is unparseable YAML: {exc}"
+    except (yaml.YAMLError, OSError, UnicodeDecodeError) as exc:
+        msg = f"missing manifest: probe.yaml unreadable or unparseable: {exc}"
         raise ProbeGateError(msg) from exc
     if not isinstance(raw, dict):
         msg = "missing manifest: probe.yaml must parse to a mapping"

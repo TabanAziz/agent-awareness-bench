@@ -109,6 +109,14 @@ def test_unparseable_yaml_hits_manifest_gate(tmp_path: Path) -> None:
         load_probe(root)
 
 
+def test_unreadable_manifest_bytes_hit_manifest_gate(tmp_path: Path) -> None:
+    root = _write_probe(tmp_path, with_files=False)
+    (root / "probe.yaml").write_bytes(b"\xff\xfe\xfa\x00 not utf-8 \xff")
+
+    with pytest.raises(ProbeGateError, match="unreadable or unparseable"):
+        load_probe(root)
+
+
 def test_non_mapping_yaml_hits_manifest_gate(tmp_path: Path) -> None:
     root = _write_probe(tmp_path, yaml_text="- just\n- a list\n")
 
