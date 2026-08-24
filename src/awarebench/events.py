@@ -30,6 +30,7 @@ class EventType:
     TOOL_RESULT: Final = "tool_result"
     MODEL_MESSAGE: Final = "model_message"
     COMPACTION: Final = "compaction"
+    RUNTIME_DEGRADATION: Final = "runtime_degradation"
     FAULT_INJECTED: Final = "fault_injected"
     BUDGET: Final = "budget"
     REPORT: Final = "report"
@@ -40,6 +41,7 @@ EventTypeLiteral = Literal[
     "tool_result",
     "model_message",
     "compaction",
+    "runtime_degradation",
     "fault_injected",
     "budget",
     "report",
@@ -99,7 +101,8 @@ class Event(BaseModel):
         """Enforce typed minimums for structured event types.
 
         TOOL_CALL and TOOL_RESULT carry call_id: str; COMPACTION carries
-        dropped_seq: list[int]. All other event types stay free-form JSON dicts.
+        dropped_seq: list[int]; RUNTIME_DEGRADATION carries kind: str. All
+        other event types stay free-form JSON dicts.
         """
         if self.type in (EventType.TOOL_CALL, EventType.TOOL_RESULT):
             call_id = self.payload.get("call_id")
@@ -114,6 +117,12 @@ class Event(BaseModel):
             ):
                 raise ValueError(
                     f"event type '{self.type}' requires payload field dropped_seq: list[int]"
+                )
+        elif self.type == EventType.RUNTIME_DEGRADATION:
+            kind = self.payload.get("kind")
+            if not isinstance(kind, str) or not kind:
+                raise ValueError(
+                    f"event type '{self.type}' requires non-empty payload field kind: str"
                 )
         return self
 

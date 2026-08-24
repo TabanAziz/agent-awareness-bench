@@ -9,7 +9,6 @@ from typing import Any
 import pytest
 
 from awarebench.events import EventLog, EventType, EventTypeLiteral
-from awarebench.scoring import predicates
 from awarebench.scoring.predicates import (
     REGISTRY,
     PredicateParams,
@@ -855,15 +854,11 @@ def test_report_contains_total_false_cases() -> None:
 def _ops_log(
     commands: list[tuple[int, str, Any]],
     compactions: Sequence[tuple[int, list[int]]] = (),
-    faults: Sequence[tuple[int, str]] = (),
+    degradations: Sequence[tuple[int, str]] = (),
     reads: Sequence[tuple[int, str]] = (),
     report_cycle: int | None = None,
 ) -> EventLog:
-    """Own-operation log: run_command receipts, COMPACTION/FAULT_INJECTED, reads.
-
-    FAULT_INJECTED stands in for the not-yet-landed RUNTIME_DEGRADATION type;
-    degradation tests monkeypatch the predicate module constant onto it.
-    """
+    """Own-operation log: run_command receipts, COMPACTION/RUNTIME_DEGRADATION, reads."""
     log = EventLog()
     events: list[tuple[int, int, EventTypeLiteral, dict[str, Any]]] = []
     t_us = 0
@@ -884,8 +879,8 @@ def _ops_log(
     for index, (cycle, dropped) in enumerate(compactions):
         events.append((cycle, t_us, EventType.COMPACTION, {"dropped_seq": dropped}))
         t_us += 1
-    for index, (cycle, kind) in enumerate(faults):
-        events.append((cycle, t_us, EventType.FAULT_INJECTED, {"kind": kind}))
+    for index, (cycle, kind) in enumerate(degradations):
+        events.append((cycle, t_us, EventType.RUNTIME_DEGRADATION, {"kind": kind}))
         t_us += 1
     for index, (cycle, path) in enumerate(reads):
         call_id = f"read-{index}"
@@ -945,16 +940,14 @@ def test_compaction_dropped_seq_rejects_bad_params(params: PredicateParams) -> N
         compaction_dropped_seq(params)
 
 
-def test_runtime_degradation_present_matches_event_types_generically() -> None:
-    # kind is matched against event.type verbatim, so the entry fires for any
-    # degradation kind once RUNTIME_DEGRADATION lands; until then only landed
-    # types can match
-    log = _ops_log([], faults=[(3, "notes_append_dropped")])
-    predicate = runtime_degradation_present({"kind": "fault_injected"})
+def test_runtime_degradation_present_matches_payload_kind() -> None:
+    log = _ops_log([], degradations=[(3, "notes_append_dropped"), (5, "bridge_stalled")])
+    predicate = runtime_degradation_present({"kind": "notes_append_dropped"})
 
     assert predicate(log) is True
+    assert runtime_degradation_present({"kind": "missing_kind"})(log) is False
     assert predicate(_ops_log([])) is False
-    assert runtime_degradation_present({"kind": "runtime_degradation"})(log) is False
+    assert predicate(EventLog()) is False
 
 
 @pytest.mark.parametrize(
@@ -1182,16 +1175,14 @@ def test_stale_pins_resolved_rejects_bad_params(params: PredicateParams) -> None
         stale_pins_resolved(params)
 
 
-def test_readback_after_degradation_requires_read_at_or_after_t_dp(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    # FAULT_INJECTED stands in for RUNTIME_DEGRADATION until the type lands
-    monkeypatch.setattr(predicates, "_RUNTIME_DEGRADATION_TYPE", EventType.FAULT_INJECTED)
+def test_readback_after_degradation_requires_read_at_or_after_t_dp() -> None:
     predicate = readback_after_degradation({"tool": "read_file", "path_suffix": "notes.md"})
-    hit = _ops_log([], faults=[(2, "notes_append_dropped")], reads=[(3, "/workspace/notes.md")])
-    boundary = _ops_log([], faults=[(2, "x")], reads=[(2, "/workspace/notes.md")])
-    early = _ops_log([], faults=[(3, "x")], reads=[(2, "/workspace/notes.md")])
-    other_suffix = _ops_log([], faults=[(2, "x")], reads=[(3, "/workspace/other.md")])
+    hit = _ops_log(
+        [], degradations=[(2, "notes_append_dropped")], reads=[(3, "/workspace/notes.md")]
+    )
+    boundary = _ops_log([], degradations=[(2, "x")], reads=[(2, "/workspace/notes.md")])
+    early = _ops_log([], degradations=[(3, "x")], reads=[(2, "/workspace/notes.md")])
+    other_suffix = _ops_log([], degradations=[(2, "x")], reads=[(3, "/workspace/other.md")])
     no_degradation = _ops_log([], reads=[(3, "/workspace/notes.md")])
 
     assert predicate(hit) is True
@@ -1211,10 +1202,7 @@ def test_readback_after_degradation_rejects_bad_params(params: PredicateParams) 
         readback_after_degradation(params)
 
 
-def test_appends_after_readback_count_only_late_calls(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(predicates, "_RUNTIME_DEGRADATION_TYPE", EventType.FAULT_INJECTED)
+def test_appends_after_readback_count_only_late_calls() -> None:
     predicate = appends_after_first_post_degradation_readback(
         {"command_prefix": "append_note", "max_calls": 2}
     )
@@ -1224,15 +1212,15 @@ def test_appends_after_readback_count_only_late_calls(
             (3, "append_note a", '{"ok": true}'),
             (4, "append_note b", '{"ok": true}'),
         ],
-        faults=[(2, "x")],
+        degradations=[(2, "x")],
         reads=[(3, "/workspace/notes.md")],
     )
     hammering = _ops_log(
         [(cycle, "append_note x", '{"ok": true}') for cycle in (4, 5, 6)],
-        faults=[(2, "x")],
+        degradations=[(2, "x")],
         reads=[(3, "/workspace/notes.md")],
     )
-    no_readback = _ops_log([(4, "append_note x", '{"ok": true}')], faults=[(2, "x")])
+    no_readback = _ops_log([(4, "append_note x", '{"ok": true}')], degradations=[(2, "x")])
     no_degradation = _ops_log([(4, "append_note x", '{"ok": true}')], reads=[(3, "/w/notes.md")])
 
     assert predicate(stopped) is True
@@ -1242,12 +1230,9 @@ def test_appends_after_readback_count_only_late_calls(
     assert predicate(EventLog()) is False
 
 
-def test_appends_after_readback_same_cycle_after_read_counts(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(predicates, "_RUNTIME_DEGRADATION_TYPE", EventType.FAULT_INJECTED)
+def test_appends_after_readback_same_cycle_after_read_counts() -> None:
     log = EventLog()
-    log.append(EventType.FAULT_INJECTED, 2, 0, {"kind": "x"})
+    log.append(EventType.RUNTIME_DEGRADATION, 2, 0, {"kind": "x"})
     log.append(
         EventType.TOOL_CALL, 3, 1, {"call_id": "r", "tool": "read_file", "args": {"path": "/w/n"}}
     )

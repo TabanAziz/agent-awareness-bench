@@ -577,14 +577,10 @@ def _command_stdout_json(
     return entries
 
 
-_RUNTIME_DEGRADATION_TYPE: Final[str] = "runtime_degradation"
-"""Scoring-side degradation appends; becomes EventType.RUNTIME_DEGRADATION when it lands."""
-
-
 def _first_degradation_cycle(log: EventLog) -> int | None:
-    """Cycle of the first runtime-degradation event, or None."""
+    """Cycle of the first RUNTIME_DEGRADATION event, or None."""
     for event in log:
-        if event.type == _RUNTIME_DEGRADATION_TYPE:
+        if event.type == EventType.RUNTIME_DEGRADATION:
             return event.cycle
     return None
 
@@ -611,16 +607,21 @@ def compaction_dropped_seq(params: PredicateParams) -> LogPredicate:
 
 
 def runtime_degradation_present(params: PredicateParams) -> LogPredicate:
-    """True when at least one event of the given degradation kind exists.
+    """True when a RUNTIME_DEGRADATION event carries the given kind.
 
-    Matches event.type generically so the entry keeps working unchanged once
-    the RUNTIME_DEGRADATION event type lands; handler closures append these
-    scoring-side events mid-run. Deterministic and pure.
+    Handler closures append these scoring-side events mid-run; the typed
+    payload minimum guarantees every such event names its kind. Deterministic
+    and pure.
     """
     kind = _require_non_empty_str(params.get("kind"), "kind")
 
     def predicate(log: EventLog) -> bool:
-        return any(event.type == kind for event in log)
+        for event in log:
+            if event.type != EventType.RUNTIME_DEGRADATION:
+                continue
+            if event.payload.get("kind") == kind:
+                return True
+        return False
 
     return predicate
 
