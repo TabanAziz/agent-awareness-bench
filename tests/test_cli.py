@@ -49,10 +49,20 @@ def _make_probe(tmp_path: Path) -> Path:
         "cheat_surface": {"strategies": [{"attack": "a", "defeated_by": "b"}]},
     }
     (root / "probe.yaml").write_text(yaml.safe_dump(manifest), encoding="utf-8")
-    for rel in ("env/Dockerfile", "injection.py", "control.py", "generator.py"):
+    for rel in ("env/Dockerfile",):
         target = root / rel
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text("placeholder\n", encoding="utf-8")
+    # Minimal artifact modules satisfying the runtime contract the CLI loads.
+    (root / "generator.py").write_text(
+        "def generate(seed):\n    return {'seed': seed}\n",
+        encoding="utf-8",
+    )
+    for role in ("injection", "control"):
+        (root / f"{role}.py").write_text(
+            "def apply(parts, seed, log):\n    return None\n",
+            encoding="utf-8",
+        )
     return root
 
 

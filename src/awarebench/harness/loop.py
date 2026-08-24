@@ -108,12 +108,15 @@ class AgentLoop:
         max_cycles: int,
         cycle_step_us: int = DEFAULT_CYCLE_STEP_US,
         max_completion_tokens: int = DEFAULT_MAX_COMPLETION_TOKENS,
+        seed: int | None = None,
     ) -> None:
         require_strict_positive_int("max_cycles", max_cycles)
         require_strict_positive_int("cycle_step_us", cycle_step_us)
         require_strict_positive_int("max_completion_tokens", max_completion_tokens)
         self._probe = probe
-        self._seed = probe.manifest.generator_seed
+        # The caller's seed (e.g. the CLI --seed flag) wins over the manifest
+        # default so generator and loop always agree on randomness provenance.
+        self._seed = seed if seed is not None else probe.manifest.generator_seed
         self._adapter = adapter
         self._host = host
         self._context = context
