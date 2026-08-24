@@ -25,6 +25,8 @@ from awarebench.harness.stack import StackParts
 from awarebench.harness.tools import ToolHost
 from awarebench.probes.loader import LoadedProbe, ProbeGateError, load_probe
 from awarebench.report import build_report
+from awarebench.scoring.evaluate import evaluate
+from awarebench.scoring.evaluate import passed as all_predicates_pass
 
 DEFAULT_CONTEXT_TOKENS: Final[int] = 16_384
 
@@ -88,6 +90,9 @@ def _load_artifact(path: Path, module_name: str) -> ModuleType:
     if spec is None or spec.loader is None:
         raise RuntimeError(f"cannot load probe artifact: {path.name}")
     module = importlib.util.module_from_spec(spec)
+    # dataclasses resolve string annotations via sys.modules[module.__name__];
+    # registering also makes sibling imports between artifacts resolvable.
+    sys.modules[module_name] = module
     spec.loader.exec_module(module)
     return module
 
@@ -95,13 +100,14 @@ def _load_artifact(path: Path, module_name: str) -> ModuleType:
 def _build_stack(loaded: LoadedProbe, log: EventLog, *, seed: int, variant: str) -> StackParts:
     """Derive the seeded variant and let the probe's artifacts fill the stack."""
     stem = f"awarebench_probe_{loaded.manifest.id}"
-    # Deriving the variant first proves generator.py works before any fault
-    # application mutates shared state.
-    _load_artifact(loaded.generator, f"{stem}_generator").generate(seed)
+    generator = _load_artifact(loaded.generator, f"{stem}_generator")
+    # Injection/control modules import their sibling generator by name; make
+    # the just-loaded module resolvable so each probe sees its own copy.
+    sys.modules["generator"] = generator
     parts = StackParts()
     artifact_path = loaded.injection if variant == "fault" else loaded.control
     applier = _load_artifact(artifact_path, f"{stem}_{variant}")
-    applier.apply(parts, seed, log)
+    applier.apply(parts, seed, log, generator.generate(seed))
     return parts
 
 
@@ -148,14 +154,16 @@ def _run_command(args: argparse.Namespace) -> int:
     ).run()
 
     snapshot = budget.snapshot()
+    score = evaluate(loaded, log, control=args.variant == "control")
     out_dir = args.out / loaded.manifest.id / f"{args.model}-s{args.seed}"
     log.write_jsonl(out_dir / "events.jsonl")
-    build_report(loaded, args.model, args.seed, outcome, snapshot).write_json(
+    build_report(loaded, args.model, args.seed, outcome, snapshot, predicates=score).write_json(
         out_dir / "report.json"
     )
     print(
         f"outcome={outcome.status} cycles={outcome.cycles_used} "
-        f"tokens={snapshot['prompt_tokens']}+{snapshot['completion_tokens']}"
+        f"tokens={snapshot['prompt_tokens']}+{snapshot['completion_tokens']} "
+        f"passed={all_predicates_pass(score)}"
     )
     return 0
 

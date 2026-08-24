@@ -60,7 +60,7 @@ def _make_probe(tmp_path: Path) -> Path:
     )
     for role in ("injection", "control"):
         (root / f"{role}.py").write_text(
-            "def apply(parts, seed, log):\n    return None\n",
+            "def apply(parts, seed, log, variant):\n    return None\n",
             encoding="utf-8",
         )
     return root
