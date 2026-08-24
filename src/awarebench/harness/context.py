@@ -12,18 +12,27 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictInt, field_validator
 
 from awarebench.events import EventLog, EventType
+from awarebench.harness._validation import (
+    require_strict_non_negative_int,
+    require_strict_positive_int,
+)
 from awarebench.harness.clock import CycleCounter, VirtualClock
 
 
 class Message(BaseModel):
-    """One immutable transcript entry; seq is assigned by ContextWindow."""
+    """One immutable transcript entry.
+
+    seq is scoring-side identity assigned by ContextWindow; it is never
+    surfaced agent-visible. Read transcripts through
+    ContextWindow.transcript(), which exposes only (role, content) pairs.
+    """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    seq: int
+    seq: StrictInt = Field(ge=0)
     role: str
     content: str
 
@@ -45,50 +54,53 @@ def crude_token_count(content: str) -> int:
     return len(content) // 4
 
 
-type DropPolicy = Callable[[Sequence[Message], int, int], list[Message]]
+type DropPolicy = Callable[[Sequence[Message], int, int, Callable[[str], int]], list[Message]]
 """Selects survivors under pressure.
 
-Contract: called as policy(messages, tokens_to_free, incoming_tokens) with the
-window's current messages in order; must return an ordered subset of those
-messages (the kept ones) without mutating the input. The window derives the
-dropped set by seq difference and logs it.
+Called as policy(messages, tokens_to_free, incoming_tokens, token_counter)
+with the window's current messages in order. Must return an ordered subset of
+those messages — the kept ones — without mutating the input and without
+inventing entries; the window validates that shape before anything is logged
+or mutated, then derives the dropped set by seq difference.
+
+The counter argument is the window's own effective per-string tokenizer
+function (tiktoken-style). Vendor-reported usage aggregates never flow
+through it; they route solely into BudgetAccountant. Policies must size
+messages under this one consistent ledger so their decisions match the
+window's accounting.
 """
 
 
-def drop_oldest(token_counter: Callable[[str], int] = crude_token_count) -> DropPolicy:
+def drop_oldest(
+    messages: Sequence[Message],
+    tokens_to_free: int,
+    incoming_tokens: int,
+    token_counter: Callable[[str], int],
+) -> list[Message]:
     """Pop messages from the front until enough tokens are freed or empty."""
-
-    def policy(
-        messages: Sequence[Message], tokens_to_free: int, incoming_tokens: int
-    ) -> list[Message]:
-        kept = list(messages)
-        freed = 0
-        while kept and freed < tokens_to_free:
-            freed += token_counter(kept.pop(0).content)
-        return kept
-
-    return policy
+    kept = list(messages)
+    freed = 0
+    while kept and freed < tokens_to_free:
+        freed += token_counter(kept.pop(0).content)
+    return kept
 
 
 def drop_oldest_half(
-    token_counter: Callable[[str], int] = crude_token_count,
-) -> DropPolicy:
+    messages: Sequence[Message],
+    tokens_to_free: int,
+    incoming_tokens: int,
+    token_counter: Callable[[str], int],
+) -> list[Message]:
     """Drop the oldest half in one cut; front-pop more if that falls short."""
-
-    def policy(
-        messages: Sequence[Message], tokens_to_free: int, incoming_tokens: int
-    ) -> list[Message]:
-        kept = list(messages)
-        cut = len(kept) // 2
-        freed = 0
-        for message in kept[:cut]:
-            freed += token_counter(message.content)
-        kept = kept[cut:]
-        while kept and freed < tokens_to_free:
-            freed += token_counter(kept.pop(0).content)
-        return kept
-
-    return policy
+    kept = list(messages)
+    cut = len(kept) // 2
+    freed = 0
+    for message in kept[:cut]:
+        freed += token_counter(message.content)
+    kept = kept[cut:]
+    while kept and freed < tokens_to_free:
+        freed += token_counter(kept.pop(0).content)
+    return kept
 
 
 class ContextWindow:
@@ -98,8 +110,19 @@ class ContextWindow:
     push usage past max_tokens, the DropPolicy picks the survivors; each
     compaction round logs one truthful COMPACTION event carrying the dropped
     seqs and freed token count, stamped with the current virtual time and
-    cycle. Domain rejections (oversized message, bad input, do-nothing
-    policy) raise ValueError and never touch the log or the message state.
+    cycle. dropped_seq names transcript-scoped Message.seq values, never the
+    event log's own seq namespace.
+
+    Rejected adds are absolutely side-effect free: domain rejections
+    (oversized message, bad input, a policy that frees nothing or returns a
+    malformed kept list) raise ValueError with zero events logged and zero
+    state change. Compaction rounds are buffered and committed atomically
+    only once the incoming message is known to fit.
+
+    Token accounting contract: token_counter is a per-string tokenizer
+    function (tiktoken-style). Vendor-reported usage aggregates never flow
+    through it; they route solely into BudgetAccountant. The window measures
+    perceived pressure under this one consistent ledger.
     """
 
     def __init__(
@@ -111,10 +134,7 @@ class ContextWindow:
         token_counter: Callable[[str], int] | None = None,
         policy: DropPolicy | None = None,
     ) -> None:
-        if isinstance(max_tokens, bool) or not isinstance(max_tokens, int):
-            raise ValueError(f"max_tokens must be an int, got {type(max_tokens).__name__}")
-        if max_tokens <= 0:
-            raise ValueError(f"max_tokens must be > 0, got {max_tokens}")
+        require_strict_positive_int("max_tokens", max_tokens)
         self._log = event_log
         self._clock = clock
         self._cycles = cycles
@@ -122,9 +142,7 @@ class ContextWindow:
         self._token_counter: Callable[[str], int] = (
             token_counter if token_counter is not None else crude_token_count
         )
-        self._policy: DropPolicy = (
-            policy if policy is not None else drop_oldest(self._token_counter)
-        )
+        self._policy: DropPolicy = policy if policy is not None else drop_oldest
         self._messages: list[Message] = []
         self._used_tokens = 0
         self._compaction_count = 0
@@ -137,17 +155,45 @@ class ContextWindow:
         if not isinstance(content, str):
             raise ValueError(f"content must be a str, got {type(content).__name__}")
         incoming = self._token_counter(content)
-        if incoming < 0:
-            raise ValueError(f"token_counter returned negative count: {incoming}")
+        require_strict_non_negative_int("token count", incoming)
         if incoming > self._max_tokens:
             raise ValueError(
                 f"incoming message needs {incoming} tokens, window holds {self._max_tokens}"
             )
-        while self._used_tokens + incoming > self._max_tokens:
-            self._compact(
-                tokens_to_free=self._used_tokens + incoming - self._max_tokens,
-                incoming_tokens=incoming,
+        rounds: list[tuple[list[Message], list[Message], int]] = []
+        working = self._messages
+        used = self._used_tokens
+        while used + incoming > self._max_tokens:
+            kept = list(
+                self._policy(
+                    working,
+                    used + incoming - self._max_tokens,
+                    incoming,
+                    self._token_counter,
+                )
             )
+            self._validate_kept(working, kept)
+            kept_seqs = {message.seq for message in kept}
+            dropped = [message for message in working if message.seq not in kept_seqs]
+            if not dropped:
+                raise ValueError("drop policy freed no messages; cannot make room")
+            freed = sum(self._token_counter(message.content) for message in dropped)
+            rounds.append((kept, dropped, freed))
+            working = kept
+            used -= freed
+        for kept, dropped, freed in rounds:
+            self._log.append(
+                EventType.COMPACTION,
+                self._cycles.current,
+                self._clock.now_us,
+                {
+                    "dropped_seq": [message.seq for message in dropped],
+                    "freed_tokens": freed,
+                },
+            )
+            self._compaction_count += 1
+        self._messages = working
+        self._used_tokens = used
         message = Message(seq=self._next_seq, role=role, content=content)
         self._next_seq += 1
         self._messages.append(message)
@@ -158,6 +204,10 @@ class ContextWindow:
         """Return the surviving transcript in order, as a defensive copy."""
         return tuple(self._messages)
 
+    def transcript(self) -> tuple[tuple[str, str], ...]:
+        """Agent-safe view: (role, content) pairs without scoring-side seqs."""
+        return tuple((message.role, message.content) for message in self._messages)
+
     @property
     def used_tokens(self) -> int:
         """Token cost of the surviving messages under the injected counter."""
@@ -165,26 +215,18 @@ class ContextWindow:
 
     @property
     def compaction_count(self) -> int:
-        """Number of compaction rounds performed so far."""
+        """Number of committed compaction rounds so far."""
         return self._compaction_count
 
-    def _compact(self, tokens_to_free: int, incoming_tokens: int) -> None:
-        """Run one compaction round: policy, truthful event, state update."""
-        kept = self._policy(self._messages, tokens_to_free, incoming_tokens)
-        kept_seqs = {message.seq for message in kept}
-        dropped = [message for message in self._messages if message.seq not in kept_seqs]
-        if not dropped:
-            raise ValueError("drop policy freed no messages; cannot make room")
-        freed_tokens = sum(self._token_counter(message.content) for message in dropped)
-        self._log.append(
-            EventType.COMPACTION,
-            self._cycles.current,
-            self._clock.now_us,
-            {
-                "dropped_seq": [message.seq for message in dropped],
-                "freed_tokens": freed_tokens,
-            },
-        )
-        self._messages = list(kept)
-        self._used_tokens -= freed_tokens
-        self._compaction_count += 1
+    @staticmethod
+    def _validate_kept(input_messages: Sequence[Message], kept: list[Message]) -> None:
+        """Reject kept lists that are not ordered subsequences of the input."""
+        index_by_seq = {message.seq: index for index, message in enumerate(input_messages)}
+        last_index = -1
+        for message in kept:
+            index = index_by_seq.get(message.seq)
+            if index is None:
+                raise ValueError(f"drop policy returned unknown message seq {message.seq}")
+            if index <= last_index:
+                raise ValueError("drop policy returned duplicated or reordered messages")
+            last_index = index

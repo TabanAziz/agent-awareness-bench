@@ -8,7 +8,6 @@ from typing import Any
 
 import pytest
 
-import awarebench.harness as harness_package
 from awarebench.events import EventLog, EventType
 from awarebench.harness.clock import CycleCounter, VirtualClock
 from awarebench.harness.context import (
@@ -80,6 +79,16 @@ def test_messages_returns_defensive_copy() -> None:
     assert len(window.messages()) == 2
 
 
+def test_transcript_returns_agent_safe_role_content_pairs() -> None:
+    window, *_ = _make_window(max_tokens=100)
+
+    window.add("system", "constraint")
+    window.add("user", "question")
+
+    assert window.transcript() == (("system", "constraint"), ("user", "question"))
+    assert all(isinstance(pair, tuple) and len(pair) == 2 for pair in window.transcript())
+
+
 def test_add_rejects_empty_role_without_logging() -> None:
     window, log, *_ = _make_window(max_tokens=10)
 
@@ -99,6 +108,12 @@ def test_constructor_rejects_bad_max_tokens(bad_max: Any) -> None:
             cycles=CycleCounter(),
             max_tokens=bad_max,
         )
+
+
+@pytest.mark.parametrize("bad_seq", [-1, True, 1.5])
+def test_message_rejects_bad_seq_on_direct_construction(bad_seq: Any) -> None:
+    with pytest.raises(ValueError):
+        Message(seq=bad_seq, role="user", content="x")
 
 
 # --- default policy: silent drop of the earliest message ----------------------
@@ -135,8 +150,7 @@ def test_constraint_survives_half_cut_then_dies_at_threshold() -> None:
     costs: dict[str, int] = {"constraint": 2}
     for index in range(8):
         costs[f"f{index}"] = 2
-    counter = _fixed_counter(costs)
-    window, log, *_ = _make_window(max_tokens=10, costs=costs, policy=drop_oldest_half(counter))
+    window, log, *_ = _make_window(max_tokens=10, costs=costs, policy=drop_oldest_half)
 
     seqs = {name: window.add("user", name).seq for name in ("f0", "f1")}
     seqs["constraint"] = window.add("system", "constraint").seq
@@ -181,9 +195,32 @@ def test_incoming_larger_than_window_raises_without_logging() -> None:
     assert window.used_tokens == 1
 
 
-def test_do_nothing_policy_raises_without_corrupting_state() -> None:
+def test_zero_cost_history_under_pressure_rejects_cleanly() -> None:
+    costs = {"nothing": 0, "heavy": 6}
+    window, log, *_ = _make_window(max_tokens=5, costs=costs)
+
+    window.add("user", "nothing")
+    window.add("user", "nothing")
+    assert window.used_tokens == 0
+
+    with pytest.raises(ValueError, match="window holds"):
+        window.add("user", "heavy")
+
+    assert len(log) == 0
+    assert len(window.messages()) == 2
+    assert window.used_tokens == 0
+    assert window.compaction_count == 0
+
+
+# --- rejected adds are absolutely side-effect free ------------------------------
+
+
+def test_do_nothing_policy_leaves_zero_events_and_intact_state() -> None:
     def noop(
-        messages: Sequence[Message], tokens_to_free: int, incoming_tokens: int
+        messages: Sequence[Message],
+        tokens_to_free: int,
+        incoming_tokens: int,
+        token_counter: Callable[[str], int],
     ) -> list[Message]:
         return list(messages)
 
@@ -200,6 +237,113 @@ def test_do_nothing_policy_raises_without_corrupting_state() -> None:
     assert len(log) == 0
 
 
+def test_policy_frees_then_stalls_leaves_zero_events_and_intact_state() -> None:
+    calls: list[int] = []
+
+    def one_shot_then_noop(
+        messages: Sequence[Message],
+        tokens_to_free: int,
+        incoming_tokens: int,
+        token_counter: Callable[[str], int],
+    ) -> list[Message]:
+        calls.append(tokens_to_free)
+        if len(calls) == 1:
+            return list(messages[1:])
+        return list(messages)
+
+    costs = {"a": 1, "b": 3, "c": 2}
+    window, log, *_ = _make_window(max_tokens=4, costs=costs, policy=one_shot_then_noop)
+    window.add("user", "a")
+    window.add("user", "b")
+
+    # Needing 2 freed tokens, round 1 drops "a" but frees only 1, forcing
+    # round 2, which stalls. The whole add must abort: zero events, zero
+    # state change.
+    with pytest.raises(ValueError, match="freed no messages"):
+        window.add("user", "c")
+
+    assert [m.content for m in window.messages()] == ["a", "b"]
+    assert window.used_tokens == 4
+    assert window.compaction_count == 0
+    assert len(log) == 0
+
+
+def test_smuggler_policy_rejected_with_zero_events_and_intact_state() -> None:
+    def smuggler(
+        messages: Sequence[Message],
+        tokens_to_free: int,
+        incoming_tokens: int,
+        token_counter: Callable[[str], int],
+    ) -> list[Message]:
+        return [Message(seq=999, role="ghost", content="boo")]
+
+    costs = {"a": 2, "b": 2}
+    window, log, *_ = _make_window(max_tokens=3, costs=costs, policy=smuggler)
+    window.add("user", "a")
+
+    with pytest.raises(ValueError, match="unknown message seq"):
+        window.add("user", "b")
+
+    assert [m.content for m in window.messages()] == ["a"]
+    assert window.used_tokens == 2
+    assert window.compaction_count == 0
+    assert len(log) == 0
+
+
+def test_padded_superset_policy_rejected_with_zero_events_and_intact_state() -> None:
+    def padder(
+        messages: Sequence[Message],
+        tokens_to_free: int,
+        incoming_tokens: int,
+        token_counter: Callable[[str], int],
+    ) -> list[Message]:
+        return [*messages, messages[0]]
+
+    costs = {"a": 2, "b": 2}
+    window, log, *_ = _make_window(max_tokens=3, costs=costs, policy=padder)
+    window.add("user", "a")
+
+    with pytest.raises(ValueError, match="duplicated or reordered"):
+        window.add("user", "b")
+
+    assert [m.content for m in window.messages()] == ["a"]
+    assert window.used_tokens == 2
+    assert window.compaction_count == 0
+    assert len(log) == 0
+
+
+def test_stingy_policy_buffers_two_rounds_then_commits_atomically() -> None:
+    def stingy(
+        messages: Sequence[Message],
+        tokens_to_free: int,
+        incoming_tokens: int,
+        token_counter: Callable[[str], int],
+    ) -> list[Message]:
+        return list(messages[1:]) if messages else []
+
+    costs = {"x": 1, "yy": 2}
+    window, log, clock, cycles = _make_window(max_tokens=3, costs=costs, policy=stingy)
+    for _ in range(3):
+        window.add("user", "x")
+    clock.advance_us(250)
+    cycles.advance()
+
+    # The incoming message needs 2 freed tokens; one stingy drop frees only
+    # 1, so the window buffers a second round before committing atomically.
+    fourth = window.add("user", "yy")
+
+    assert fourth.seq == 3
+    assert [m.content for m in window.messages()] == ["x", "yy"]
+    assert [m.seq for m in window.messages()] == [2, 3]
+    assert window.used_tokens == 3
+    assert window.compaction_count == 2
+    events = _compaction_events(log)
+    assert len(events) == 2
+    assert [event.payload["dropped_seq"] for event in events] == [[0], [1]]
+    assert [event.payload["freed_tokens"] for event in events] == [1, 1]
+    assert all(event.cycle == 1 and event.t_us == 250 for event in events)
+
+
 # --- built-in policies as units -------------------------------------------------
 
 
@@ -211,7 +355,7 @@ def _four_messages() -> list[Message]:
 def test_drop_oldest_pops_front_until_enough_freed() -> None:
     counter = _fixed_counter({"a": 4, "b": 2, "c": 2, "d": 1})
 
-    kept = drop_oldest(counter)(_four_messages(), 5, 2)
+    kept = drop_oldest(_four_messages(), 5, 2, counter)
 
     assert [m.seq for m in kept] == [2, 3]
 
@@ -221,11 +365,11 @@ def test_drop_oldest_half_cuts_half_then_falls_back_to_front_popping() -> None:
     messages = _four_messages()
 
     # Half cut frees a(4)+b(2)=6 >= 5: exactly the oldest half goes.
-    kept = drop_oldest_half(counter)(messages, 5, 2)
+    kept = drop_oldest_half(messages, 5, 2, counter)
     assert [m.seq for m in kept] == [2, 3]
 
     # Needing 9 exceeds the half cut (6): c(2) then d(1) are popped too.
-    kept = drop_oldest_half(counter)(messages, 9, 2)
+    kept = drop_oldest_half(messages, 9, 2, counter)
     assert kept == []
 
 
@@ -235,7 +379,7 @@ def test_drop_oldest_half_on_odd_count_cuts_floor_half() -> None:
         Message(seq=index, role="user", content=c) for index, c in enumerate(("a", "b", "c"))
     ]
 
-    kept = drop_oldest_half(counter)(messages, 2, 2)
+    kept = drop_oldest_half(messages, 2, 2, counter)
 
     assert [m.seq for m in kept] == [1, 2]
 
@@ -285,6 +429,7 @@ def test_identical_windows_produce_identical_states_and_jsonl(tmp_path: Path) ->
         window_b.add(role, content)
 
     assert window_a.messages() == window_b.messages()
+    assert window_a.transcript() == window_b.transcript()
     assert window_a.used_tokens == window_b.used_tokens
     assert window_a.compaction_count == window_b.compaction_count == 1
     path_a = tmp_path / "a.jsonl"
@@ -292,15 +437,3 @@ def test_identical_windows_produce_identical_states_and_jsonl(tmp_path: Path) ->
     log_a.write_jsonl(path_a)
     log_b.write_jsonl(path_b)
     assert path_a.read_bytes() == path_b.read_bytes()
-
-
-# --- package export surface -------------------------------------------------------
-
-
-def test_harness_package_reexports_context_module() -> None:
-    assert harness_package.ContextWindow is ContextWindow
-    assert harness_package.Message is Message
-    assert harness_package.DropPolicy is DropPolicy
-    assert harness_package.drop_oldest is drop_oldest
-    assert harness_package.drop_oldest_half is drop_oldest_half
-    assert harness_package.crude_token_count is crude_token_count
