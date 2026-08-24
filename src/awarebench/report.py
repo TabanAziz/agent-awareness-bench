@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict
 
@@ -14,9 +15,9 @@ from awarebench.probes.loader import LoadedProbe
 class RunReport(BaseModel):
     """Frozen summary of one probe run, written next to its event log."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
-    schema_version: int = 1
+    schema_version: Literal[1] = 1
     probe_id: str
     model: str
     seed: int
