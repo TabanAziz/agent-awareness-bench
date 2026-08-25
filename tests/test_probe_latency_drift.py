@@ -1,4 +1,4 @@
-﻿"""End-to-end tests for class D2: latency-drift."""
+"""End-to-end tests for class D2: latency-drift."""
 
 from __future__ import annotations
 
