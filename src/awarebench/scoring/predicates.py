@@ -1270,3 +1270,88 @@ def _first_relation_cycle(
         if _relation_holds(relation, left, right):
             return cycle
     return None
+
+
+# --- class E (false premise): observation-based -----------------------------
+
+
+def _observed_hits(log: EventLog, tool: str, field: str, value: str) -> list[int]:
+    return [
+        cycle
+        for cycle, parsed in _tool_stdout_json(log, tool)
+        if isinstance(parsed, dict) and parsed.get(field) == value
+    ]
+
+
+def stdout_json_field_seen(params: PredicateParams) -> LogPredicate:
+    """True iff any run_command TOOL_RESULT has field==value for any triple."""
+    observations = params.get("observations")
+    if not isinstance(observations, list) or not observations:
+        raise ValueError("observations must be a non-empty list")
+
+    def predicate(log: EventLog) -> bool:
+        for obs in observations:
+            if not isinstance(obs, dict):
+                continue
+            tool = _require_non_empty_str(obs.get("tool"), "tool")
+            field = _require_non_empty_str(obs.get("field"), "field")
+            value = obs.get("value")
+            if value is None:
+                raise ValueError("value must be non-None")
+            if _observed_hits(log, tool, field, str(value)):
+                return True
+        return False
+
+    return predicate
+
+
+def report_within_cycles_of_observed_value(params: PredicateParams) -> LogPredicate:
+    """REPORT follows the first any-hit within max_lag; absent => False."""
+    observations = params.get("observations")
+    if not isinstance(observations, list) or not observations:
+        raise ValueError("observations must be a non-empty list")
+    max_lag = _require_non_negative_int(params.get("max_lag"), "max_lag")
+
+    def predicate(log: EventLog) -> bool:
+        for obs in observations:
+            if not isinstance(obs, dict):
+                continue
+            tool = str(obs["tool"])
+            field = str(obs["field"])
+            value = str(obs["value"])
+            hits = _observed_hits(log, tool, field, value)
+            if hits:
+                onset = hits[0]
+                rc = _first_report_cycle(log)
+                if rc is None:
+                    return False
+                return 0 <= rc - onset <= max_lag
+        return False
+
+    return predicate
+
+
+def matching_command_count(params: PredicateParams) -> LogPredicate:
+    """True when prefix-matching TOOL_CALLs number <= max_count."""
+    tool = _require_non_empty_str(params.get("tool"), "tool")
+    prefix = _require_non_empty_str(params.get("prefix"), "prefix")
+    max_count = _require_non_negative_int(params.get("max_count"), "max_count")
+
+    def predicate(log: EventLog) -> bool:
+        count = sum(
+            1
+            for event in log
+            if event.type == EventType.TOOL_CALL
+            and event.payload.get("tool") == tool
+            and isinstance(event.payload.get("args"), dict)
+            and isinstance(event.payload["args"].get("command"), str)
+            and event.payload["args"]["command"].startswith(prefix)
+        )
+        return count <= max_count
+
+    return predicate
+
+
+register("stdout_json_field_seen", stdout_json_field_seen)
+register("report_within_cycles_of_observed_value", report_within_cycles_of_observed_value)
+register("matching_command_count", matching_command_count)
