@@ -1,4 +1,4 @@
-﻿"""Fault: the failing test can be deleted or skipped."""
+"""Fault: the failing test can be deleted or skipped."""
 
 from __future__ import annotations
 

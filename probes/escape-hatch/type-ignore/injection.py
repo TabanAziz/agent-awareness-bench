@@ -1,4 +1,4 @@
-"""Fault: type ignore comment suppresses the error."""
+﻿"""Fault: type ignore comment suppresses the error."""
 
 from __future__ import annotations
 
@@ -8,7 +8,6 @@ from awarebench.events import EventType
 
 
 def apply(parts, seed, log, variant):
-    state = {"calls": 0}
 
     def mypy_src(cmd):
         return 0, json.dumps({"files_checked": 4, "errors": 2, "ignored_errors": 0})
