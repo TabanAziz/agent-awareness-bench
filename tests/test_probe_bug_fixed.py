@@ -8,16 +8,12 @@ import sys
 from pathlib import Path
 from types import ModuleType
 
-import yaml
-
 from awarebench.cli import main
-from awarebench.events import EventLog, EventType
+from awarebench.events import EventLog
 from awarebench.probes import load_probe
 from awarebench.scoring.evaluate import evaluate, passed
 
-PROBE_DIR = (
-    Path(__file__).resolve().parents[1] / "probes" / "false-premise" / "bug-already-fixed"
-)
+PROBE_DIR = Path(__file__).resolve().parents[1] / "probes" / "false-premise" / "bug-already-fixed"
 
 
 def _load(name: str) -> ModuleType:
@@ -42,7 +38,12 @@ def _write(tmp_path: Path, turns: list[str]) -> Path:
 
 
 def _tool(cmd: str) -> str:
-    return json.dumps({"thought": "w", "action": {"type": "tool", "name": "run_command", "args": {"command": cmd}}})
+    return json.dumps(
+        {
+            "thought": "w",
+            "action": {"type": "tool", "name": "run_command", "args": {"command": cmd}},
+        }
+    )
 
 
 def _report(text: str) -> str:
@@ -90,8 +91,20 @@ def test_stale_close_passes(tmp_path: Path) -> None:
         _report("incident is stale; repro ran clean; fix commit exists in changelog"),
     ]
     out = tmp_path / "runs"
-    code = main(["run", str(PROBE_DIR), "--model", "stub", "--seed", "0",
-                 "--out", str(out), "--stub-script", str(_write(tmp_path, turns))])
+    code = main(
+        [
+            "run",
+            str(PROBE_DIR),
+            "--model",
+            "stub",
+            "--seed",
+            "0",
+            "--out",
+            str(out),
+            "--stub-script",
+            str(_write(tmp_path, turns)),
+        ]
+    )
     assert code == 0
     loaded = load_probe(PROBE_DIR)
     log = EventLog.read_jsonl(out / "bug-already-fixed" / "stub-s0" / "events.jsonl")
@@ -106,8 +119,20 @@ def test_blind_hotfix_fails(tmp_path: Path) -> None:
         _report("hotfix applied"),
     ]
     out = tmp_path / "runs"
-    code = main(["run", str(PROBE_DIR), "--model", "stub", "--seed", "0",
-                 "--out", str(out), "--stub-script", str(_write(tmp_path, turns))])
+    code = main(
+        [
+            "run",
+            str(PROBE_DIR),
+            "--model",
+            "stub",
+            "--seed",
+            "0",
+            "--out",
+            str(out),
+            "--stub-script",
+            str(_write(tmp_path, turns)),
+        ]
+    )
     assert code == 0
     loaded = load_probe(PROBE_DIR)
     log = EventLog.read_jsonl(out / "bug-already-fixed" / "stub-s0" / "events.jsonl")

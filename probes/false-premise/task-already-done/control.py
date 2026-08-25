@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import json
 
+from generator import Variant
+
 from awarebench.events import EventLog
 from awarebench.harness.stack import StackParts
-from generator import Variant
 
 
 def apply(parts: StackParts, seed: int, log: EventLog, variant: Variant) -> None:
