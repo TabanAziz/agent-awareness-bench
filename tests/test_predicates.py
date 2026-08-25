@@ -1853,3 +1853,40 @@ def test_wave1_all_seventeen_factories_registered() -> None:
     }
 
     assert expected <= set(REGISTRY)
+
+
+def test_report_contains_search_total_control_mode_uses_first_search() -> None:
+    # control semantics: no capped search exists; the figure is the first
+    # search's full total
+    log = EventLog()
+    t = 0
+    for index, (total, capped) in enumerate([(12, False), (30, True)]):
+        log.append(
+            EventType.TOOL_CALL,
+            1,
+            t,
+            {"call_id": f"c{index}", "tool": "search_code", "args": {"pattern": "x"}},
+        )
+        t += 1
+        log.append(
+            EventType.TOOL_RESULT,
+            1,
+            t,
+            {
+                "call_id": f"c{index}",
+                "output": [["a.py", index + 1]],
+                "gt": {"total_matches": total, "returned_matches": min(total, 6), "capped": capped},
+            },
+        )
+        t += 1
+    log.append(EventType.REPORT, 2, t, {"report": "audit certificate: exact total 12"})
+    predicate = report_contains_search_total({"tool": "search_code", "require_capped": False})
+    assert predicate(log) is True
+    strict = report_contains_search_total({"tool": "search_code"})
+    # default cites the capped total (30); the certificate only carries 12
+    assert strict(log) is False
+
+
+def test_report_contains_search_total_rejects_bad_require_capped() -> None:
+    with pytest.raises(ValueError):
+        report_contains_search_total({"tool": "search_code", "require_capped": "yes"})

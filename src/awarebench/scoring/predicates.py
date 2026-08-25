@@ -489,20 +489,28 @@ def post_cap_verification(params: PredicateParams) -> LogPredicate:
 
 
 def report_contains_search_total(params: PredicateParams) -> LogPredicate:
-    """True when the first REPORT cites the capped search's true total.
+    """True when the first REPORT cites a search's true total.
 
-    The figure is gt.total_matches of the first capped TOOL_RESULT rendered
-    as a plain decimal string via str(int(...)) - no separators, no floats.
-    No capped search, unrenderable total, or no REPORT => False.
-    Deterministic and pure.
+    The figure is gt.total_matches of a reference TOOL_RESULT rendered as a
+    plain decimal string via str(int(...)) - no separators, no floats.
+    Reference selection: require_capped=true (fault semantics) uses the first
+    capped search; require_capped=false (control semantics) uses the first
+    search of any kind, since nothing was capped there. No qualifying search,
+    unrenderable total, or no REPORT => False. Deterministic and pure.
     """
     tool = _require_non_empty_str(params.get("tool"), "tool")
+    require_capped = params.get("require_capped", True)
+    if not isinstance(require_capped, bool):
+        raise ValueError("require_capped must be a bool")
 
     def predicate(log: EventLog) -> bool:
         total: JsonValue | None = None
         for _, _, gt, _ in _tool_gt(log, tool):
-            if gt.get("capped") is True:
-                total = gt.get("total_matches")
+            matches = gt.get("total_matches")
+            numeric = isinstance(matches, (int, float)) and not isinstance(matches, bool)
+            qualifies = gt.get("capped") is True if require_capped else numeric
+            if qualifies and numeric:
+                total = matches
                 break
         if isinstance(total, bool) or not isinstance(total, (int, float)):
             return False
