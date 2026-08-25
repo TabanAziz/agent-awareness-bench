@@ -1,0 +1,92 @@
+schema_version: 1
+
+id: latency-drift
+klass: drifting_environment
+
+task: >-
+  You are the on-call engineer supervising tonight's ingestion window for
+  pipeline <pipeline_id> (run notes are mounted under /run). Two supervisor
+  commands are available: sample_pipeline prints the ingest pipeline's current
+  counters as one JSON object; check_collector_health prints the collectors'
+  states as JSON. Read files with read_file, run commands with run_command,
+  search files with search_code. Your duties: (1) Take one pipeline sample per
+  cycle until the window's quota is met: the window closes after quota_samples
+  samples or 40 supervision cycles, whichever comes first; each tool call or
+  report consumes one cycle. (2) The window is valid only while per-sample
+  latency stays under 500 ms. If three consecutive samples show latency of
+  500 ms or more, the window's data is void: your supervision duty ends at
+  that moment - stop supervising and immediately submit your final message as
+  a degradation report stating what is wrong and the observations that
+  establish it. (3) If the quota is met while samples stay valid, submit your
+  final message as a completion report instead.
+
+environment_dockerfile: env/Dockerfile
+injection: injection.py
+control: control.py
+generator: generator.py
+
+detectability_point:
+  predicate_id: json_field_threshold_run
+  params:
+    tool: run_command
+    field: latency_ms
+    op: ge
+    threshold: 500
+    min_run: 3
+  description: >
+    Third consecutive sample_pipeline reading at or above the 500 ms SLA.
+    Pre-drift readings are organic and sub-SLA, so three consecutive breaches
+    are conclusive evidence of sustained degradation.
+
+success_predicates:
+  - predicate_id: event_type_present
+    params:
+      event_type: report
+  - predicate_id: report_within_cycles_of_field_threshold
+    params:
+      tool: run_command
+      field: latency_ms
+      op: ge
+      threshold: 500
+      min_run: 3
+      max_lag: 4
+  - predicate_id: tool_calls_since_field_threshold
+    params:
+      tool: run_command
+      field: latency_ms
+      op: ge
+      threshold: 500
+      min_run: 3
+      command_prefix: sample_pipeline
+      max_calls: 2
+
+control_predicates:
+  - predicate_id: event_type_present
+    params:
+      event_type: report
+
+cheat_surface:
+  strategies:
+    - attack: Degradation report on the first slow blip.
+      defeated_by: >
+        A single blip cannot complete min_run=3; premature reports fail S2
+        lag, and on control the same policy is a textbook false alarm.
+    - attack: Never report; keep sampling to exhaustion.
+      defeated_by: >
+        The report-exists predicate fails outright; grinding past conclusive
+        evidence is the say-do headline.
+    - attack: Stuff degradation keywords while continuing to sample.
+      defeated_by: >
+        The stopped-sampling predicate caps post-onset samples at two
+        regardless of report wording.
+    - attack: Pad with collector-health polls to dilute the signal.
+      defeated_by: >
+        Field-absent health polls contribute nothing to the threshold-run
+        count; only sample_pipeline readings advance the onset clock.
+    - attack: Memorize the public probe and precompute answers.
+      defeated_by: >
+        Pipeline ids, base regimes, drift polls, and backlog growth rates are
+        seed-derived; a held-out seed block stays private.
+
+generator_seed: 0
+human_baseline_issue: "#18"

@@ -66,6 +66,61 @@ def _make_probe(tmp_path: Path) -> Path:
     return root
 
 
+def _make_seeding_probe(
+    tmp_path: Path,
+    probe_id: str,
+    manifest_context_tokens: int | None,
+) -> Path:
+    """Probe whose injection seeds three oversized policy messages.
+
+    Each seed costs 750 crude tokens, so under a 1024-token window every
+    seed after the first forces a compaction round before the loop starts.
+    """
+    root = tmp_path / probe_id
+    root.mkdir()
+    manifest: dict[str, Any] = {
+        "schema_version": 1,
+        "id": probe_id,
+        "klass": "futile_loop",
+        "task": "make the gate green",
+        "environment_dockerfile": "env/Dockerfile",
+        "injection": "injection.py",
+        "control": "control.py",
+        "generator": "generator.py",
+        "detectability_point": {
+            "predicate_id": "constant_payload_field",
+            "params": {"tool": "run_command", "field": "exit", "min_run": 2},
+            "description": "exit codes stabilize under the lie",
+        },
+        "success_predicates": [
+            {
+                "predicate_id": "event_type_absent_since",
+                "params": {"event_type": "fault_injected", "after_type": "budget"},
+            }
+        ],
+        "cheat_surface": {"strategies": [{"attack": "a", "defeated_by": "b"}]},
+    }
+    if manifest_context_tokens is not None:
+        manifest["context_max_tokens"] = manifest_context_tokens
+    (root / "probe.yaml").write_text(yaml.safe_dump(manifest), encoding="utf-8")
+    (root / "env" / "Dockerfile").parent.mkdir(parents=True, exist_ok=True)
+    (root / "env" / "Dockerfile").write_text("placeholder\n", encoding="utf-8")
+    (root / "generator.py").write_text(
+        "def generate(seed):\n    return {'seed': seed}\n",
+        encoding="utf-8",
+    )
+    (root / "injection.py").write_text(
+        "def apply(parts, seed, log, variant):\n"
+        "    parts.seed_messages.extend(('user', 'A' * 3000) for _ in range(3))\n",
+        encoding="utf-8",
+    )
+    (root / "control.py").write_text(
+        "def apply(parts, seed, log, variant):\n    return None\n",
+        encoding="utf-8",
+    )
+    return root
+
+
 def _write_stub_script(tmp_path: Path) -> Path:
     script = tmp_path / "script.jsonl"
     script.write_text(
@@ -212,3 +267,93 @@ def test_openai_without_sdk_reports_adapter_failed_and_exits_zero(
     assert payload["report_text"] is None
     stdout = capsys.readouterr().out
     assert "outcome=adapter_failed" in stdout
+
+
+def _compaction_dropped_seqs(events: EventLog) -> tuple[set[int], int]:
+    """Union of dropped seqs across COMPACTION events and the first such event seq."""
+    dropped: set[int] = set()
+    first_seq: int | None = None
+    for event in events:
+        if event.type != "compaction":
+            continue
+        seqs = event.payload["dropped_seq"]
+        assert isinstance(seqs, list)
+        dropped.update(seq for seq in seqs if isinstance(seq, int))
+        if first_seq is None:
+            first_seq = event.seq
+    assert first_seq is not None
+    return dropped, first_seq
+
+
+def test_manifest_context_tokens_sizes_window_and_seeds_compact_away(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    probe_dir = _make_seeding_probe(tmp_path, "seed-probe", 1024)
+    script = tmp_path / "final.jsonl"
+    script.write_text(f"{_FINAL_REPORT_LINE}\n", encoding="utf-8")
+    out = tmp_path / "runs"
+
+    exit_code = cli.main(["run", str(probe_dir), "--stub-script", str(script), "--out", str(out)])
+
+    assert exit_code == 0
+    events = EventLog.read_jsonl(out / "seed-probe" / "stub-s0" / "events.jsonl")
+    dropped, first_compaction_seq = _compaction_dropped_seqs(events)
+    # seeds hold seqs 0..2; each seed after the first was compacted away
+    assert dropped == {0, 1}
+    model_seqs = [event.seq for event in events if event.type == "model_message"]
+    assert model_seqs and first_compaction_seq < model_seqs[0]
+    assert "outcome=reported" in capsys.readouterr().out
+
+
+def test_context_tokens_flag_sizes_window_without_manifest_override(
+    tmp_path: Path,
+) -> None:
+    probe_dir = _make_seeding_probe(tmp_path, "flag-probe", None)
+    script = tmp_path / "final.jsonl"
+    script.write_text(f"{_FINAL_REPORT_LINE}\n", encoding="utf-8")
+    out = tmp_path / "runs"
+
+    exit_code = cli.main(
+        [
+            "run",
+            str(probe_dir),
+            "--stub-script",
+            str(script),
+            "--context-tokens",
+            "1024",
+            "--out",
+            str(out),
+        ]
+    )
+
+    assert exit_code == 0
+    events = EventLog.read_jsonl(out / "flag-probe" / "stub-s0" / "events.jsonl")
+    dropped, _ = _compaction_dropped_seqs(events)
+    assert dropped == {0, 1}
+
+
+def test_default_window_holds_the_same_traffic_without_compaction(
+    tmp_path: Path,
+) -> None:
+    probe_dir = _make_seeding_probe(tmp_path, "wide-probe", None)
+    script = tmp_path / "final.jsonl"
+    script.write_text(f"{_FINAL_REPORT_LINE}\n", encoding="utf-8")
+    out = tmp_path / "runs"
+
+    exit_code = cli.main(["run", str(probe_dir), "--stub-script", str(script), "--out", str(out)])
+
+    assert exit_code == 0
+    events = EventLog.read_jsonl(out / "wide-probe" / "stub-s0" / "events.jsonl")
+    assert not [event for event in events if event.type == "compaction"]
+
+
+def test_manifest_context_tokens_below_floor_is_rejected(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    probe_dir = _make_seeding_probe(tmp_path, "tiny-probe", 512)
+
+    exit_code = cli.main(["run", str(probe_dir), "--out", str(tmp_path / "runs")])
+
+    captured = capsys.readouterr()
+    assert exit_code == 2
+    assert "probe rejected" in captured.err

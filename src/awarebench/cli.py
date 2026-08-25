@@ -19,7 +19,7 @@ from awarebench.adapters import AnthropicAdapter, ModelAdapter, OpenAIAdapter, S
 from awarebench.events import EventLog
 from awarebench.harness.budget import BudgetAccountant
 from awarebench.harness.clock import CycleCounter, VirtualClock
-from awarebench.harness.context import ContextWindow
+from awarebench.harness.context import ContextWindow, DropPolicy, drop_oldest, drop_oldest_half
 from awarebench.harness.loop import AgentLoop
 from awarebench.harness.stack import StackParts
 from awarebench.harness.tools import ToolHost
@@ -63,6 +63,12 @@ def main(argv: list[str] | None = None) -> int:
         default=2048,
         help="Maximum completion tokens requested per model call.",
     )
+    run_parser.add_argument(
+        "--context-tokens",
+        type=int,
+        default=DEFAULT_CONTEXT_TOKENS,
+        help="Default context window size; a manifest context_max_tokens overrides it.",
+    )
     run_parser.add_argument("--out", type=Path, default=Path("runs"))
     run_parser.add_argument(
         "--stub-script",
@@ -84,6 +90,19 @@ def main(argv: list[str] | None = None) -> int:
         return 3
 
 
+_POLICY_FACTORIES: Final[dict[str, DropPolicy]] = {
+    "drop_oldest": drop_oldest,
+    "drop_oldest_half": drop_oldest_half,
+}
+
+
+def _policy_by_name(name: str | None) -> DropPolicy:
+    """Resolve a variant-named drop policy; None and unknown fall back to oldest."""
+    if name is None:
+        return _POLICY_FACTORIES["drop_oldest"]
+    return _POLICY_FACTORIES.get(name, _POLICY_FACTORIES["drop_oldest"])
+
+
 def _load_artifact(path: Path, module_name: str) -> ModuleType:
     """Import a probe artifact module from its resolved path."""
     spec = importlib.util.spec_from_file_location(module_name, path)
@@ -97,14 +116,22 @@ def _load_artifact(path: Path, module_name: str) -> ModuleType:
     return module
 
 
-def _build_stack(loaded: LoadedProbe, log: EventLog, *, seed: int, variant: str) -> StackParts:
+def _build_stack(
+    loaded: LoadedProbe,
+    log: EventLog,
+    clock: VirtualClock,
+    cycles: CycleCounter,
+    *,
+    seed: int,
+    variant: str,
+) -> StackParts:
     """Derive the seeded variant and let the probe's artifacts fill the stack."""
-    stem = f"awarebench_probe_{loaded.manifest.id}"
+    stem = f"awb_probe_{loaded.manifest.id}"
     generator = _load_artifact(loaded.generator, f"{stem}_generator")
     # Injection/control modules import their sibling generator by name; make
     # the just-loaded module resolvable so each probe sees its own copy.
     sys.modules["generator"] = generator
-    parts = StackParts()
+    parts = StackParts(clock=clock, cycles=cycles, log=log)
     artifact_path = loaded.injection if variant == "fault" else loaded.control
     applier = _load_artifact(artifact_path, f"{stem}_{variant}")
     applier.apply(parts, seed, log, generator.generate(seed))
@@ -125,7 +152,7 @@ def _run_command(args: argparse.Namespace) -> int:
     clock = VirtualClock()
     cycles = CycleCounter()
     budget = BudgetAccountant()
-    parts = _build_stack(loaded, log, seed=args.seed, variant=args.variant)
+    parts = _build_stack(loaded, log, clock, cycles, seed=args.seed, variant=args.variant)
     host = ToolHost(
         log,
         clock,
@@ -136,7 +163,25 @@ def _run_command(args: argparse.Namespace) -> int:
         command_handlers=parts.command_handlers,
         http_table=parts.http_table,
     )
-    context = ContextWindow(log, clock, cycles, max_tokens=DEFAULT_CONTEXT_TOKENS)
+    # Window sizing precedence: probe variant override, then the manifest,
+    # then the flag. Policy comes from the variant when it names one.
+    window_tokens = (
+        parts.context_max_tokens
+        if parts.context_max_tokens is not None
+        else loaded.manifest.context_max_tokens
+    )
+    policy = _policy_by_name(parts.drop_policy)
+    context = ContextWindow(
+        log,
+        clock,
+        cycles,
+        max_tokens=window_tokens if window_tokens is not None else args.context_tokens,
+        policy=policy,
+    )
+    # Seeded messages enter the transcript before any loop cycle so they hold
+    # the earliest seqs and compact away first under pressure.
+    for role, content in parts.seed_messages:
+        context.add(role, content)
 
     adapter = _build_adapter(args)
     outcome = AgentLoop(

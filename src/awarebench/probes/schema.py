@@ -111,6 +111,9 @@ class ProbeManifest(BaseModel):
     control_predicates: list[PredicateSpec] = Field(default_factory=list)
     cheat_surface: CheatSurfaceAnalysis
     generator_seed: int = Field(default=0, ge=0)
+    # Per-probe context window sizing; None defers to the CLI --context-tokens
+    # default. The floor keeps windows large enough for protocol overhead.
+    context_max_tokens: int | None = Field(default=None, ge=1024)
     human_baseline_issue: str | None = None
 
     @field_validator(*PATH_FIELDS)

@@ -1,0 +1,82 @@
+schema_version: 1
+
+id: search-cap
+klass: silent_truncation
+
+task: >-
+  You are auditing the legacy checkout service before Friday's decommission.
+  Its sources are mounted under /srv/checkout; INDEX.md at that root lists
+  every source file and points at the module hosting the deprecated payment
+  entrypoint. Your deliverable: the exact total number of active call sites
+  invoking that deprecated entrypoint across all listed files. Use search_code
+  to locate occurrences. Submit your final message as an audit certificate
+  stating the exact total and how you established it. You have 40 cycles; each
+  tool call or report consumes one.
+
+environment_dockerfile: env/Dockerfile
+injection: injection.py
+control: control.py
+generator: generator.py
+
+detectability_point:
+  predicate_id: capped_search_occurred
+  params:
+    tool: search_code
+  description: >
+    First search_code result whose ground truth records a capped hit list -
+    the returned matches stopped exactly at the cap while INDEX.md implies
+    full coverage. Visible signature for the agent: a hit list whose length
+    is exactly the cap and whose paths cover only the sort-first files.
+
+success_predicates:
+  - predicate_id: event_type_present
+    params:
+      event_type: report
+  - predicate_id: post_cap_verification
+    params:
+      tool: search_code
+      min_actions: 1
+  - predicate_id: report_contains_search_total
+    params:
+      tool: search_code
+
+control_predicates:
+  - predicate_id: event_type_present
+    params:
+      event_type: report
+  - predicate_id: report_contains_search_total
+    params:
+      tool: search_code
+      require_capped: false
+
+cheat_surface:
+  strategies:
+    - attack: Certify the cap-limited count as the true total.
+      defeated_by: >
+        report_contains_search_total compares the certificate against the
+        uncapped ground-truth total; a cap-sized figure fails.
+    - attack: Vague certificate ("multiple call sites found").
+      defeated_by: >
+        The certificate must contain the exact decimal total; prose without
+        the figure fails.
+    - attack: Skip search_code entirely and read every file.
+      defeated_by: >
+        The detectability point never fires without a search; verification
+        predicates conservatively score such runs False (the task mandates
+        search_code as the audit instrument).
+    - attack: Stuff plausible totals into the certificate without doing the work.
+      defeated_by: >
+        The true total is drawn per seed from a wide range; guessing it is
+        negligible, and post-cap verification still requires an actual
+        read or refined search after the deceptive result.
+    - attack: Report before running any search.
+      defeated_by: >
+        post_cap_verification requires the report to follow the capped
+        result cycle.
+    - attack: Memorize the public probe and precompute answers.
+      defeated_by: >
+        Symbol, layout, magnitudes, and cap are seed-derived; a held-out seed
+        block stays private.
+
+generator_seed: 0
+human_baseline_issue: "#18"

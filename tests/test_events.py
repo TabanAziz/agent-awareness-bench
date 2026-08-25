@@ -208,6 +208,20 @@ def test_compaction_requires_dropped_seq() -> None:
     assert len(log) == 1
 
 
+def test_runtime_degradation_requires_non_empty_kind() -> None:
+    log = EventLog()
+
+    with pytest.raises(ValueError, match="kind"):
+        log.append(EventType.RUNTIME_DEGRADATION, 0, 0, {})
+    with pytest.raises(ValueError, match="kind"):
+        log.append(EventType.RUNTIME_DEGRADATION, 0, 0, {"kind": ""})
+    with pytest.raises(ValueError, match="kind"):
+        log.append(EventType.RUNTIME_DEGRADATION, 0, 0, {"kind": 5})
+
+    log.append(EventType.RUNTIME_DEGRADATION, 0, 0, {"kind": "notes_append_dropped"})
+    assert len(log) == 1
+
+
 def test_append_rejects_cycle_time_regressions_but_allows_equal_and_higher() -> None:
     log = EventLog()
     log.append(EventType.BUDGET, cycle=0, t_us=10, payload={})
@@ -227,6 +241,7 @@ def test_event_type_constants_match_the_literal_union() -> None:
         EventType.TOOL_RESULT,
         EventType.MODEL_MESSAGE,
         EventType.COMPACTION,
+        EventType.RUNTIME_DEGRADATION,
         EventType.FAULT_INJECTED,
         EventType.BUDGET,
         EventType.REPORT,
@@ -237,6 +252,7 @@ def test_event_type_constants_match_the_literal_union() -> None:
     assert EventType.TOOL_RESULT == "tool_result"
     assert EventType.MODEL_MESSAGE == "model_message"
     assert EventType.COMPACTION == "compaction"
+    assert EventType.RUNTIME_DEGRADATION == "runtime_degradation"
     assert EventType.FAULT_INJECTED == "fault_injected"
     assert EventType.BUDGET == "budget"
     assert EventType.REPORT == "report"
