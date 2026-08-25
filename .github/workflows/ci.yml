@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+      - run: uv sync
+      - run: uv run ruff format --check .
+      - run: uv run ruff check .
+
+  typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+      - run: uv sync
+      - run: uv run mypy --strict
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+      - run: uv sync
+      - run: uv run pytest -q
+
+  leakage-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+      - run: uv sync
+      - run: uv run python tools/leakage_scan.py probes/
+
+  determinism-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+      - run: uv sync
+      - name: Run reference probe twice and diff event logs
+        run: |
+          uv run python -c "
+          import json, sys
+          from pathlib import Path
+          from awarebench.cli import main
+          tmp = Path('.determinism-check')
+          results = []
+          for i in range(2):
+              out = tmp / f'run{i}'
+              code = main(['run', 'probes/futile-loop/progress-plateau',
+                           '--model', 'stub', '--seed', '0', '--out', str(out)])
+              assert code == 0, f'run {i} failed with exit {code}'
+              trace = (out / 'progress-plateau' / 'stub-s0' / 'events.jsonl').read_text(encoding='utf-8')
+              results.append(trace)
+          if results[0] != results[1]:
+              print('DETERMINISM VIOLATION: event logs differ between identical runs')
+              sys.exit(1)
+          print('Determinism check passed.')
+          "
