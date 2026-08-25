@@ -1,0 +1,1 @@
+﻿# impostor-decorator (class F)
