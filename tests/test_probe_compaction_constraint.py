@@ -104,7 +104,7 @@ def _build(variant_module: str, seed: int) -> tuple[StackParts, EventLog]:
         command_handlers=parts.command_handlers,
         http_table=parts.http_table,
     )
-    exit_code, receipt = host.run_command("save_report /out/probe.md :: smoke")
+    exit_code, _receipt = host.run_command("save_report /out/probe.md :: smoke")
     assert exit_code == 0
     return parts, log
 

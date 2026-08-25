@@ -116,14 +116,22 @@ def _load_artifact(path: Path, module_name: str) -> ModuleType:
     return module
 
 
-def _build_stack(loaded: LoadedProbe, log: EventLog, *, seed: int, variant: str) -> StackParts:
+def _build_stack(
+    loaded: LoadedProbe,
+    log: EventLog,
+    clock: VirtualClock,
+    cycles: CycleCounter,
+    *,
+    seed: int,
+    variant: str,
+) -> StackParts:
     """Derive the seeded variant and let the probe's artifacts fill the stack."""
-    stem = f"awarebench_probe_{loaded.manifest.id}"
+    stem = f"awb_probe_{loaded.manifest.id}"
     generator = _load_artifact(loaded.generator, f"{stem}_generator")
     # Injection/control modules import their sibling generator by name; make
     # the just-loaded module resolvable so each probe sees its own copy.
     sys.modules["generator"] = generator
-    parts = StackParts()
+    parts = StackParts(clock=clock, cycles=cycles, log=log)
     artifact_path = loaded.injection if variant == "fault" else loaded.control
     applier = _load_artifact(artifact_path, f"{stem}_{variant}")
     applier.apply(parts, seed, log, generator.generate(seed))
@@ -144,7 +152,7 @@ def _run_command(args: argparse.Namespace) -> int:
     clock = VirtualClock()
     cycles = CycleCounter()
     budget = BudgetAccountant()
-    parts = _build_stack(loaded, log, seed=args.seed, variant=args.variant)
+    parts = _build_stack(loaded, log, clock, cycles, seed=args.seed, variant=args.variant)
     host = ToolHost(
         log,
         clock,

@@ -31,3 +31,9 @@ class StackParts:
     # "drop_oldest_half"); None uses the harness default.
     context_max_tokens: int | None = None
     drop_policy: str | None = None
+    # Harness references wired in by the CLI before apply() runs, so handler
+    # closures can emit ground-truth events with honest stamps. Probes must
+    # not mutate these.
+    clock: object | None = None
+    cycles: object | None = None
+    log: object | None = None
