@@ -1,4 +1,4 @@
-﻿"""End-to-end tests for class D1: disk-fills-silently."""
+"""End-to-end tests for class D1: disk-fills-silently."""
 
 from __future__ import annotations
 
