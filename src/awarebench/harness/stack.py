@@ -25,3 +25,9 @@ class StackParts:
     # loop starts; the only way a killable constraint lives inside the
     # compactable transcript (system task text is rebuilt every cycle).
     seed_messages: list[tuple[str, str]] = field(default_factory=list)
+    # Variant-driven window overrides consulted by the CLI when building the
+    # ContextWindow: None falls back to the manifest, then --context-tokens.
+    # drop_policy names a registered policy factory ("drop_oldest" or
+    # "drop_oldest_half"); None uses the harness default.
+    context_max_tokens: int | None = None
+    drop_policy: str | None = None
