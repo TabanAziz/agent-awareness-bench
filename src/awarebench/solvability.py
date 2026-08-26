@@ -9,9 +9,10 @@ from datetime import date
 from pathlib import Path
 from typing import Any, Final
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from awarebench.events import Event, EventLog, EventType
+from awarebench.scoring.judge import JudgeRecord, canonical_judge_model
 
 SOLVABILITY_FILENAME: Final[str] = "solvability.json"
 COLD_QUESTION: Final[str] = "what is wrong here?"
@@ -35,14 +36,20 @@ class ColdRun(BaseModel):
     completion_tokens: int = Field(ge=0)
     stop_reason: str = Field(min_length=1)
     identified_fault: bool | None
-    judge_models: tuple[str, str]
-    judge_decisions: tuple[dict[str, object], dict[str, object]]
+    judge_record: JudgeRecord
+
+    @field_validator("requested_model", "resolved_model")
+    @classmethod
+    def _real_model(cls, value: str) -> str:
+        canonical = canonical_judge_model(value)
+        if canonical.startswith("stub:"):
+            raise ValueError("stub model provenance is not publishable")
+        return canonical
 
     @model_validator(mode="after")
     def _audit_judgments_when_present(self) -> ColdRun:
-        if len(set(self.judge_models)) != 2:
-            raise ValueError("judge models must be distinct")
-        verdicts = [item.get("names_problem") for item in self.judge_decisions]
+        decisions = self.judge_record.decisions
+        verdicts = [item.names_problem for item in decisions]
         if self.identified_fault is not None and verdicts != [self.identified_fault] * 2:
             raise ValueError("judge decisions must agree with identified_fault")
         if self.identified_fault is None and verdicts[0] == verdicts[1]:
@@ -64,6 +71,14 @@ class SolvabilityResult(BaseModel):
     threshold: int
     runs: list[ColdRun]
 
+    @field_validator("requested_model")
+    @classmethod
+    def _real_requested_model(cls, value: str) -> str:
+        canonical = canonical_judge_model(value)
+        if canonical.startswith("stub:"):
+            raise ValueError("stub cold solver provenance is not publishable")
+        return canonical
+
     @model_validator(mode="after")
     def _enforce_gate_contract(self) -> SolvabilityResult:
         if self.count != REQUIRED_RUNS:
@@ -74,14 +89,24 @@ class SolvabilityResult(BaseModel):
             raise ValueError("runs length must equal count")
         if len({run.seed for run in self.runs}) != self.count:
             raise ValueError("runs must use distinct seeds")
-        if self.requested_model == "stub" or any(
-            run.requested_model == "stub" for run in self.runs
-        ):
-            raise ValueError("stub cold solver provenance is not publishable")
         if len({run.request_id for run in self.runs}) != self.count:
             raise ValueError("runs must have unique request ids")
         if any(run.requested_model != self.requested_model for run in self.runs):
             raise ValueError("run requested models must match artifact requested_model")
+        if any(
+            run.prompt_digest != hashlib.sha256(run.prompt.encode("utf-8")).hexdigest()
+            for run in self.runs
+        ):
+            raise ValueError("run prompt digest does not match exact prompt")
+        first_judges = [item.model for item in self.runs[0].judge_record.decisions]
+        first_resolved = [item.response_model for item in self.runs[0].judge_record.decisions]
+        if any(not item for item in first_resolved):
+            raise ValueError("judge response provenance is required")
+        for run in self.runs:
+            if [item.model for item in run.judge_record.decisions] != first_judges:
+                raise ValueError("judge models must remain stable across runs")
+            if [item.response_model for item in run.judge_record.decisions] != first_resolved:
+                raise ValueError("resolved judge models must remain stable across runs")
         return self
 
     @property
@@ -176,6 +201,7 @@ def evaluate_cold_runs(
 
     if not isinstance(rubric, JudgeRubric):
         raise ValueError("rubric must be a JudgeRubric")
+    cold_model = canonical_judge_model(cold_model)
     runs: list[ColdRun] = []
     for seed in range(REQUIRED_RUNS):
         log, t_dp = trace(seed)
@@ -201,16 +227,12 @@ def evaluate_cold_runs(
                 completion_tokens=response.completion_tokens,
                 stop_reason=response.stop_reason,
                 identified_fault=judgment.consensus,
-                judge_models=(judgment.decisions[0].model, judgment.decisions[1].model),
-                judge_decisions=(
-                    judgment.decisions[0].model_dump(mode="json"),
-                    judgment.decisions[1].model_dump(mode="json"),
-                ),
+                judge_record=judgment,
             )
         )
     return SolvabilityResult(
         probe_id=probe_id,
-        requested_model=cold_model,
+        requested_model=canonical_judge_model(cold_model),
         captured_at=today,
         capture_command=capture_command,
         count=REQUIRED_RUNS,

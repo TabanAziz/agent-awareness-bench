@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from pathlib import Path
 from typing import Any
 
@@ -254,10 +255,6 @@ def _write_probe(tmp_path: Path, result: dict[str, Any] | None) -> Path:
 
 
 def _result(passing: int) -> dict[str, Any]:
-    decisions = (
-        {"model": "openai:judge-a", "names_problem": True},
-        {"model": "openai:judge-b", "names_problem": True},
-    )
     return {
         "schema_version": 1,
         "probe_id": "solvability-probe",
@@ -272,22 +269,42 @@ def _result(passing: int) -> dict[str, Any]:
                 "prompt": "what is wrong here?",
                 "response": "x",
                 "requested_model": "openai:cold",
-                "resolved_model": "cold-resolved",
+                "resolved_model": "openai:cold-resolved",
                 "request_id": f"request-{index}",
-                "prompt_digest": "a" * 64,
+                "prompt_digest": hashlib.sha256(b"what is wrong here?").hexdigest(),
                 "prompt_tokens": 1,
                 "completion_tokens": 1,
                 "stop_reason": "end_turn",
                 "identified_fault": index < passing,
-                "judge_models": ["openai:judge-a", "openai:judge-b"],
-                "judge_decisions": list(
-                    decisions
-                    if index < passing
-                    else (
-                        {"model": "openai:judge-a", "names_problem": False},
-                        {"model": "openai:judge-b", "names_problem": False},
-                    )
-                ),
+                "judge_record": {
+                    "seq": index,
+                    "cycle": 0,
+                    "source": "report",
+                    "excerpt": "x",
+                    "decisions": [
+                        {
+                            "model": "openai:judge-a",
+                            "names_problem": index < passing,
+                            "raw_response": "{}",
+                            "response_model": "judge-a-resolved",
+                            "request_id": f"judge-a-{index}",
+                            "prompt_tokens": 1,
+                            "completion_tokens": 1,
+                            "stop_reason": "end_turn",
+                        },
+                        {
+                            "model": "openai:judge-b",
+                            "names_problem": index < passing,
+                            "raw_response": "{}",
+                            "response_model": "judge-b-resolved",
+                            "request_id": f"judge-b-{index}",
+                            "prompt_tokens": 1,
+                            "completion_tokens": 1,
+                            "stop_reason": "end_turn",
+                        },
+                    ],
+                    "consensus": index < passing,
+                },
             }
             for index in range(10)
         ],

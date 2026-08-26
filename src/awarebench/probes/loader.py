@@ -18,7 +18,6 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 from awarebench.probes.schema import PATH_FIELDS, ProbeManifest, validate_relative_path
 from awarebench.scoring.action import ACTION_REGISTRY
 from awarebench.scoring.predicates import REGISTRY, PredicateFactory
-from awarebench.solvability import SOLVABILITY_FILENAME, load_solvability
 
 _FILE_GATES: Final[dict[str, str]] = {
     "environment_dockerfile": "missing environment dockerfile",
@@ -159,6 +158,7 @@ def load_probe(
 
 def _ensure_solvability_passes(root: Path, probe_id: str) -> None:
     """Reject probes lacking ten cold runs or the documented eight-run threshold."""
+    from awarebench.solvability import SOLVABILITY_FILENAME, load_solvability
     path = root / SOLVABILITY_FILENAME
     if not path.is_file():
         raise ProbeGateError(f"missing solvability record: expected {SOLVABILITY_FILENAME}")

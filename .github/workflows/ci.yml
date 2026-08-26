@@ -41,6 +41,15 @@ jobs:
       - name: Replay held-out judge corpus
         run: uv run pytest -q tests/test_judge_validation.py
 
+  solvability-publication:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+      - run: uv sync
+      - name: Validate published solvability artifacts
+        run: uv run awarebench solvability-validate probes
+
   leakage-scan:
     runs-on: ubuntu-latest
     steps:
