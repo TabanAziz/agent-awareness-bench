@@ -11,6 +11,7 @@ import pytest
 import yaml
 
 from awarebench import cli
+from awarebench.adapters import StubAdapter
 from awarebench.events import EventLog
 
 _TOOL_CALL_LINE: Final[str] = (
@@ -219,6 +220,69 @@ def test_vendor_model_without_model_name_is_usage_error(
     captured = capsys.readouterr()
     assert exit_code == 2
     assert "--model-name is required" in captured.err
+
+
+def test_openrouter_model_spec_runs_through_agent_loop_with_safe_output_path(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    probe_dir = _make_probe(tmp_path)
+    out = tmp_path / "runs"
+    constructed_models: list[str] = []
+
+    def _adapter_factory(model: str) -> StubAdapter:
+        constructed_models.append(model)
+        return StubAdapter([_TOOL_CALL_LINE, _FINAL_REPORT_LINE])
+
+    monkeypatch.setattr(cli, "OpenRouterAdapter", _adapter_factory)
+
+    exit_code = cli.main(
+        [
+            "run",
+            str(probe_dir),
+            "--model",
+            "openrouter:vendor/model",
+            "--out",
+            str(out),
+        ]
+    )
+
+    assert exit_code == 0
+    assert constructed_models == ["vendor/model"]
+    run_dir = out / "cli-probe" / "openrouter-vendor-model-s0"
+    events = EventLog.read_jsonl(run_dir / "events.jsonl")
+    assert [event.type for event in events if event.type in {"tool_call", "tool_result"}] == [
+        "tool_call",
+        "tool_result",
+    ]
+    assert any(event.type == "model_message" for event in events)
+    assert any(event.type == "report" for event in events)
+    payload: dict[str, Any] = json.loads((run_dir / "report.json").read_text(encoding="utf-8"))
+    assert payload["model"] == "openrouter:vendor/model"
+    assert payload["outcome"] == "reported"
+    assert "outcome=reported" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    ("model", "error_text"),
+    [
+        ("openrouter:", "openrouter model id is required"),
+        ("unknown", "unsupported --model"),
+    ],
+)
+def test_invalid_model_spec_is_usage_error(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    model: str,
+    error_text: str,
+) -> None:
+    exit_code = cli.main(
+        ["run", str(tmp_path / "probe"), "--model", model, "--out", str(tmp_path / "runs")]
+    )
+
+    assert exit_code == 2
+    assert error_text in capsys.readouterr().err
 
 
 def test_unexpected_error_exits_three_with_traceback(

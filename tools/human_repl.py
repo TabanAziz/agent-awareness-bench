@@ -102,7 +102,7 @@ def main() -> int:
             print(f"[exit={code}] {stdout[:500]}")
             if len(stdout) > 500:
                 print(f"  ... ({len(stdout)} chars total)")
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 -- interactive input must not abort the session
             print(f"[error] {exc}")
 
         turn += 1
@@ -112,7 +112,7 @@ def main() -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
     log.write_jsonl(out_dir / "events.jsonl")
 
-    results = evaluate(loaded, log)
+    results = evaluate(loaded, log, control=args.variant == "control")
     print("\n=== SCORES ===")
     for pred_id, result in sorted(results.items()):
         status = "PASS" if result else "FAIL"

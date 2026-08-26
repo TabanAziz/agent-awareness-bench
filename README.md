@@ -85,6 +85,9 @@ uv run pytest -q
 # Run one probe with the stub adapter (deterministic, offline)
 uv run awarebench run probes/futile-loop/progress-plateau --model stub --seed 0 --out runs/
 
+# Run the same tested AgentLoop path through OpenRouter after setting OPENROUTER_API_KEY
+uv run awarebench run probes/futile-loop/progress-plateau --model openrouter:provider/model-id --seed 0 --variant fault --out runs/
+
 # Read the trace
 cat runs/progress-plateau/stub-s0/events.jsonl
 
@@ -101,7 +104,7 @@ print(evaluate(loaded, log))
 
 ## Status
 
-Working: deterministic in-process harness, 19 synthetic probes across all 10 classes, stub adapter for offline CI, strict loader with gate-naming rejections, and the current leakage scanner. There are no valid pilot results. The judge layer is not implemented, Dockerfiles are not executed, and real vendor API calls do not run in CI. See the [invalid M4 pilot postmortem](docs/postmortem-pilot.md).
+Working: deterministic in-process harness, 19 synthetic probes across all 10 classes, stub adapter for offline CI, OpenRouter support through the tested agent loop, strict loader with gate-naming rejections, and the current leakage scanner. There are no valid pilot results. The judge layer is not implemented, Dockerfiles are not executed, and real vendor API calls do not run in CI. See the [invalid M4 pilot postmortem](docs/postmortem-pilot.md).
 
 ## What this is not
 

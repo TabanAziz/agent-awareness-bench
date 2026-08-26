@@ -2,20 +2,27 @@
 
 from __future__ import annotations
 
+import json
+from email.message import Message
+from io import BytesIO
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Self
+from urllib.error import HTTPError
+from urllib.request import Request
 
 import pytest
 from pydantic import ValidationError
 
 import awarebench.adapters.anthropic as anthropic_module
 import awarebench.adapters.openai as openai_module
+import awarebench.adapters.openrouter as openrouter_module
 from awarebench.adapters import (
     AdapterError,
     AdapterResponse,
     AnthropicAdapter,
     ModelAdapter,
     OpenAIAdapter,
+    OpenRouterAdapter,
     StubAdapter,
 )
 
@@ -37,6 +44,31 @@ class _ExplodingEndpoint:
 
     def create(self, **kwargs: Any) -> Any:
         raise RuntimeError("transport exploded")
+
+
+class _RecordingTransport:
+    """Records an OpenRouter request and returns one raw response body."""
+
+    def __init__(self, response: dict[str, Any] | bytes) -> None:
+        self._response = (
+            json.dumps(response).encode("utf-8") if isinstance(response, dict) else response
+        )
+        self.calls: list[tuple[Request, float]] = []
+
+    def __call__(self, request: Request, timeout: float) -> bytes:
+        self.calls.append((request, timeout))
+        return self._response
+
+
+class _ExplodingTransport:
+    """OpenRouter transport whose request always fails."""
+
+    def __init__(self, error: Exception) -> None:
+        self._error = error
+
+    def __call__(self, request: Request, timeout: float) -> bytes:
+        del request, timeout
+        raise self._error
 
 
 def _anthropic_response(
@@ -72,6 +104,31 @@ def _openai_response(
         model=model,
         id=response_id,
     )
+
+
+def _openrouter_response(
+    text: str = "hello",
+    reasoning: str | None = "checked the trace",
+    finish_reason: str | None = "stop",
+    prompt_tokens: int = 11,
+    completion_tokens: int = 7,
+    model: str | None = "vendor/model",
+    response_id: str | None = "gen_1",
+) -> dict[str, Any]:
+    return {
+        "choices": [
+            {
+                "message": {"content": text, "reasoning": reasoning},
+                "finish_reason": finish_reason,
+            }
+        ],
+        "usage": {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+        },
+        "model": model,
+        "id": response_id,
+    }
 
 
 # --- stub adapter --------------------------------------------------------
@@ -183,10 +240,16 @@ def test_all_adapters_satisfy_model_adapter_protocol() -> None:
     stub: ModelAdapter = StubAdapter(["x"])
     anthropic_adapter: ModelAdapter = AnthropicAdapter(model="claude-x")
     openai_adapter: ModelAdapter = OpenAIAdapter(model="gpt-x")
+    openrouter_adapter: ModelAdapter = OpenRouterAdapter(
+        model="vendor/model",
+        api_key="test-key",
+        transport=_RecordingTransport(_openrouter_response()),
+    )
 
     assert isinstance(stub, ModelAdapter)
     assert isinstance(anthropic_adapter, ModelAdapter)
     assert isinstance(openai_adapter, ModelAdapter)
+    assert isinstance(openrouter_adapter, ModelAdapter)
 
 
 # --- anthropic adapter ---------------------------------------------------
@@ -557,6 +620,196 @@ def test_openai_constructs_default_client_lazily(monkeypatch: pytest.MonkeyPatch
 
     assert response.text == "hello"
     assert endpoint.calls[0]["model"] == "gpt-x"
+
+
+def test_openrouter_maps_fields_and_sends_exact_request() -> None:
+    transport = _RecordingTransport(_openrouter_response())
+    adapter = OpenRouterAdapter(
+        model="vendor/model",
+        api_key="test-secret",
+        transport=transport,
+    )
+
+    response = adapter.complete(
+        [{"role": "user", "content": "hi"}],
+        temperature=0.4,
+        max_tokens=64,
+    )
+
+    assert response == AdapterResponse(
+        text="hello",
+        reasoning="checked the trace",
+        prompt_tokens=11,
+        completion_tokens=7,
+        stop_reason="stop",
+        model="vendor/model",
+        request_id="gen_1",
+    )
+    assert len(transport.calls) == 1
+    request, timeout = transport.calls[0]
+    assert request.full_url == "https://openrouter.ai/api/v1/chat/completions"
+    assert request.get_method() == "POST"
+    assert request.get_header("Authorization") == "Bearer test-secret"
+    assert request.get_header("Content-type") == "application/json"
+    assert timeout == 120.0
+    assert isinstance(request.data, bytes)
+    assert json.loads(request.data.decode("utf-8")) == {
+        "model": "vendor/model",
+        "messages": [{"role": "user", "content": "hi"}],
+        "temperature": 0.4,
+        "max_tokens": 64,
+    }
+
+
+def test_openrouter_omits_max_tokens_when_not_requested() -> None:
+    transport = _RecordingTransport(_openrouter_response())
+    adapter = OpenRouterAdapter(model="vendor/model", api_key="key", transport=transport)
+
+    adapter.complete([{"role": "user", "content": "hi"}])
+
+    request, _ = transport.calls[0]
+    assert isinstance(request.data, bytes)
+    assert "max_tokens" not in json.loads(request.data.decode("utf-8"))
+
+
+def test_openrouter_reads_api_key_lazily_from_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "environment-key")
+    transport = _RecordingTransport(_openrouter_response())
+    adapter = OpenRouterAdapter(model="vendor/model", transport=transport)
+
+    adapter.complete([])
+
+    request, _ = transport.calls[0]
+    assert request.get_header("Authorization") == "Bearer environment-key"
+
+
+def test_openrouter_missing_api_key_raises_without_calling_transport(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    transport = _RecordingTransport(_openrouter_response())
+    adapter = OpenRouterAdapter(model="vendor/model", transport=transport)
+
+    with pytest.raises(AdapterError, match="OPENROUTER_API_KEY"):
+        adapter.complete([])
+
+    assert transport.calls == []
+
+
+def test_openrouter_wraps_transport_failure_without_exposing_key() -> None:
+    error = HTTPError(
+        "https://openrouter.ai/api/v1/chat/completions",
+        429,
+        "rate limited",
+        Message(),
+        BytesIO(b'{"error":"slow down"}'),
+    )
+    adapter = OpenRouterAdapter(
+        model="vendor/model",
+        api_key="do-not-print-this",
+        transport=_ExplodingTransport(error),
+    )
+
+    with pytest.raises(AdapterError, match="429") as excinfo:
+        adapter.complete([])
+
+    assert excinfo.value.__cause__ is error
+    assert "do-not-print-this" not in str(excinfo.value)
+
+
+def test_openrouter_rejects_invalid_json() -> None:
+    adapter = OpenRouterAdapter(
+        model="vendor/model",
+        api_key="key",
+        transport=_RecordingTransport(b"not json"),
+    )
+
+    with pytest.raises(AdapterError, match="JSON"):
+        adapter.complete([])
+
+
+@pytest.mark.parametrize(
+    "broken_response",
+    [
+        {},
+        {"choices": []},
+        {"choices": [{}]},
+        {"choices": [{"message": {"content": None}}]},
+        {"choices": [{"message": {"content": "hello"}}]},
+        {
+            "choices": [{"message": {"content": "hello"}}],
+            "usage": {"completion_tokens": 7},
+        },
+        {
+            "choices": [{"message": {"content": "hello"}}],
+            "usage": {"prompt_tokens": True, "completion_tokens": 7},
+        },
+        {
+            "choices": [{"message": {"content": "hello"}}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": -1},
+        },
+        {
+            "choices": [{"message": {"content": "hello"}}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1.5},
+        },
+    ],
+)
+def test_openrouter_malformed_shapes_raise_adapter_error(
+    broken_response: dict[str, Any],
+) -> None:
+    adapter = OpenRouterAdapter(
+        model="vendor/model",
+        api_key="key",
+        transport=_RecordingTransport(broken_response),
+    )
+
+    with pytest.raises(AdapterError, match="malformed"):
+        adapter.complete([])
+
+
+def test_openrouter_tolerates_missing_optional_metadata() -> None:
+    response = _openrouter_response(reasoning=None)
+    del response["model"]
+    del response["id"]
+    response["choices"][0]["finish_reason"] = None
+    transport = _RecordingTransport(response)
+    adapter = OpenRouterAdapter(model="vendor/model", api_key="key", transport=transport)
+
+    result = adapter.complete([])
+
+    assert result.reasoning is None
+    assert result.stop_reason == "unknown"
+    assert result.model is None
+    assert result.request_id is None
+
+
+def test_openrouter_default_transport_uses_urlopen(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _Response:
+        def __enter__(self) -> Self:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return json.dumps(_openrouter_response()).encode("utf-8")
+
+    calls: list[tuple[Request, float]] = []
+
+    def _fake_urlopen(request: Request, *, timeout: float) -> _Response:
+        calls.append((request, timeout))
+        return _Response()
+
+    monkeypatch.setattr(openrouter_module, "urlopen", _fake_urlopen)
+    adapter = OpenRouterAdapter(model="vendor/model", api_key="key")
+
+    result = adapter.complete([])
+
+    assert result.text == "hello"
+    assert len(calls) == 1
+    assert calls[0][1] == 120.0
 
 
 def test_mappers_tolerate_missing_model_and_request_id() -> None:

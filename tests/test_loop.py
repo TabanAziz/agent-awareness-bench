@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
+from itertools import pairwise
 from pathlib import Path
 from typing import Any, Final
 
@@ -135,6 +137,28 @@ class _ExplodingAdapter:
         raise AdapterError("sdk down")
 
 
+class _RecordingScriptAdapter:
+    """Scripted adapter that snapshots every complete() request."""
+
+    def __init__(self, responses: Sequence[str]) -> None:
+        self._stub = StubAdapter(responses)
+        self.calls: list[list[dict[str, str]]] = []
+
+    def complete(
+        self,
+        messages: Sequence[dict[str, str]],
+        *,
+        temperature: float = 0.0,
+        max_tokens: int | None = None,
+    ) -> AdapterResponse:
+        self.calls.append([dict(message) for message in messages])
+        return self._stub.complete(
+            messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+
+
 def _events_of_type(log: EventLog, event_type: str) -> list[Any]:
     return [event for event in log if event.type == event_type]
 
@@ -178,6 +202,43 @@ def test_tool_call_then_final_report(tmp_path: Path) -> None:
     assert json.loads(transcript[0][1])["action"]["type"] == "tool"
     assert transcript[1][0] == "user"
     assert "alpha" in transcript[1][1]  # repr of the read file content
+
+
+def test_each_cycle_receives_every_prior_tool_result(tmp_path: Path) -> None:
+    responses = [_TOOL_CALL, _TOOL_CALL, _TOOL_CALL, _TOOL_CALL, _FINAL_REPORT]
+    stack = _Stack(tmp_path, responses, max_cycles=5)
+    adapter = _RecordingScriptAdapter(responses)
+
+    outcome = stack.new_loop(adapter, max_cycles=5).run()
+
+    assert outcome.status == "reported"
+    assert len(adapter.calls) == 5
+    expected_transcript: list[dict[str, str]] = []
+    for call_index, sent_messages in enumerate(adapter.calls):
+        assert sent_messages[0]["role"] == "system"
+        assert sent_messages[1:] == expected_transcript
+        if call_index < 4:
+            expected_transcript.extend(
+                [
+                    {"role": "assistant", "content": _TOOL_CALL},
+                    {"role": "user", "content": repr("alpha\nbeta")},
+                ]
+            )
+
+
+def test_prompt_token_counts_strictly_increase_across_tool_cycles(tmp_path: Path) -> None:
+    responses = [_TOOL_CALL, _TOOL_CALL, _TOOL_CALL, _TOOL_CALL, _FINAL_REPORT]
+    stack = _Stack(tmp_path, responses, max_cycles=5)
+
+    outcome = stack.loop.run()
+
+    assert outcome.status == "reported"
+    counts = [
+        event.payload["prompt_tokens"]
+        for event in _events_of_type(stack.log, EventType.MODEL_MESSAGE)
+    ]
+    assert len(counts) == 5
+    assert all(left < right for left, right in pairwise(counts))
 
 
 def test_malformed_turns_consume_cycles_and_nudge(tmp_path: Path) -> None:

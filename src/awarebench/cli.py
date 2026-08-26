@@ -9,13 +9,20 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import re
 import sys
 import traceback
 from pathlib import Path
 from types import ModuleType
 from typing import Final
 
-from awarebench.adapters import AnthropicAdapter, ModelAdapter, OpenAIAdapter, StubAdapter
+from awarebench.adapters import (
+    AnthropicAdapter,
+    ModelAdapter,
+    OpenAIAdapter,
+    OpenRouterAdapter,
+    StubAdapter,
+)
 from awarebench.events import EventLog
 from awarebench.harness.budget import BudgetAccountant
 from awarebench.harness.clock import CycleCounter, VirtualClock
@@ -44,9 +51,8 @@ def main(argv: list[str] | None = None) -> int:
     run_parser.add_argument("probe_dir", type=Path)
     run_parser.add_argument(
         "--model",
-        choices=("stub", "anthropic", "openai"),
         default="stub",
-        help="Adapter backend; vendor models need --model-name.",
+        help="stub, anthropic, openai, or openrouter:<model-id>.",
     )
     run_parser.add_argument("--model-name", default=None, help="Model id for vendor adapters.")
     run_parser.add_argument("--seed", type=int, default=0)
@@ -139,8 +145,10 @@ def _build_stack(
 
 
 def _run_command(args: argparse.Namespace) -> int:
-    if args.model != "stub" and not args.model_name:
-        print(f"--model-name is required for --model {args.model}", file=sys.stderr)
+    try:
+        backend, model_id = _parse_model_spec(args.model, args.model_name)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
         return 2
     if args.stub_script is not None and not args.stub_script.is_file():
         print(f"--stub-script not found: {args.stub_script}", file=sys.stderr)
@@ -183,7 +191,7 @@ def _run_command(args: argparse.Namespace) -> int:
     for role, content in parts.seed_messages:
         context.add(role, content)
 
-    adapter = _build_adapter(args)
+    adapter = _build_adapter(args, backend=backend, model_id=model_id)
     outcome = AgentLoop(
         probe=loaded,
         adapter=adapter,
@@ -200,7 +208,7 @@ def _run_command(args: argparse.Namespace) -> int:
 
     snapshot = budget.snapshot()
     score = evaluate(loaded, log, control=args.variant == "control")
-    out_dir = args.out / loaded.manifest.id / f"{args.model}-s{args.seed}"
+    out_dir = args.out / loaded.manifest.id / _safe_run_label(args.model, args.seed)
     log.write_jsonl(out_dir / "events.jsonl")
     build_report(loaded, args.model, args.seed, outcome, snapshot, predicates=score).write_json(
         out_dir / "report.json"
@@ -213,12 +221,48 @@ def _run_command(args: argparse.Namespace) -> int:
     return 0
 
 
-def _build_adapter(args: argparse.Namespace) -> ModelAdapter:
-    if args.model == "stub":
+def _parse_model_spec(model: str, model_name: str | None) -> tuple[str, str | None]:
+    """Resolve one CLI model spec into its adapter backend and vendor model ID."""
+    if model == "stub":
+        return model, None
+    if model in {"anthropic", "openai"}:
+        if not model_name:
+            raise ValueError(f"--model-name is required for --model {model}")
+        return model, model_name
+    if model.startswith("openrouter:"):
+        openrouter_model = model.removeprefix("openrouter:").strip()
+        if not openrouter_model:
+            raise ValueError("openrouter model id is required after --model openrouter:")
+        if model_name is not None:
+            raise ValueError("--model-name cannot be combined with an openrouter:<id> spec")
+        return "openrouter", openrouter_model
+    raise ValueError(f"unsupported --model: {model}")
+
+
+def _build_adapter(
+    args: argparse.Namespace,
+    *,
+    backend: str,
+    model_id: str | None,
+) -> ModelAdapter:
+    if backend == "stub":
         return StubAdapter(_read_stub_script(args.stub_script))
-    if args.model == "anthropic":
-        return AnthropicAdapter(model=args.model_name)
-    return OpenAIAdapter(model=args.model_name)
+    if model_id is None:
+        raise ValueError(f"model id missing for {backend}")
+    if backend == "anthropic":
+        return AnthropicAdapter(model=model_id)
+    if backend == "openai":
+        return OpenAIAdapter(model=model_id)
+    if backend == "openrouter":
+        return OpenRouterAdapter(model=model_id)
+    raise ValueError(f"unsupported adapter backend: {backend}")
+
+
+def _safe_run_label(model_spec: str, seed: int) -> str:
+    """Return a stable path component for a model spec and seed."""
+    safe_model = re.sub(r"[^A-Za-z0-9._-]+", "-", model_spec)
+    safe_model = re.sub(r"-+", "-", safe_model).strip("-.") or "model"
+    return f"{safe_model}-s{seed}"
 
 
 def _read_stub_script(path: Path | None) -> list[str]:
