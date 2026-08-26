@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
@@ -228,6 +229,38 @@ def test_compaction_freed_tokens_include_replay_metadata() -> None:
     assert window.used_tokens == crude_token_count("next")
     [event] = _compaction_events(log)
     assert event.payload["freed_tokens"] == first_cost
+
+
+def test_nested_metadata_mutation_cannot_change_internal_accounting() -> None:
+    metadata: dict[str, JsonValue] = {
+        "reasoning_details": [
+            {"type": "reasoning.encrypted", "data": "ciphertext"},
+        ]
+    }
+    expected_wire: dict[str, JsonValue] = copy.deepcopy(
+        {
+            "role": "assistant",
+            "content": "ok",
+            **metadata,
+        }
+    )
+    first_cost = crude_token_count(message_token_text("ok", metadata))
+    window, log, *_ = _make_window(max_tokens=first_cost)
+
+    added = window.add("assistant", "ok", metadata=metadata)
+    snapshot = window.messages()[0]
+    for exposed in (metadata, added.metadata, snapshot.metadata):
+        details: Any = exposed["reasoning_details"]
+        details[0]["data"] = "x" * 1_000
+
+    assert window.wire_transcript() == (expected_wire,)
+    assert window.used_tokens == first_cost
+
+    window.add("user", "next")
+
+    [event] = _compaction_events(log)
+    assert event.payload["freed_tokens"] == first_cost
+    assert window.used_tokens == crude_token_count("next")
 
 
 def test_zero_cost_history_under_pressure_rejects_cleanly() -> None:

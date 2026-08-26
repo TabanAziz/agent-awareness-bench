@@ -190,7 +190,7 @@ class ContextWindow:
         self._next_seq += 1
         self._messages.append(message)
         self._used_tokens += incoming
-        return message
+        return message.model_copy(deep=True)
 
     def validate_add(
         self,
@@ -215,7 +215,7 @@ class ContextWindow:
             seq=self._next_seq,
             role=role,
             content=content,
-            metadata={} if metadata is None else metadata,
+            metadata={} if metadata is None else copy.deepcopy(metadata),
         )
 
     def _message_tokens(self, message: Message) -> int:
@@ -236,16 +236,18 @@ class ContextWindow:
         working = list(self._messages)
         used = self._used_tokens
         while used + incoming > self._max_tokens:
-            kept = list(
+            policy_messages = tuple(message.model_copy(deep=True) for message in working)
+            selected = list(
                 self._policy(
-                    working,
+                    policy_messages,
                     used + incoming - self._max_tokens,
                     incoming,
                     self._message_tokens,
                 )
             )
-            self._validate_kept(working, kept)
-            kept_seqs = {message.seq for message in kept}
+            self._validate_kept(working, selected)
+            kept_seqs = {message.seq for message in selected}
+            kept = [message for message in working if message.seq in kept_seqs]
             dropped = [message for message in working if message.seq not in kept_seqs]
             if not dropped:
                 raise ValueError("drop policy freed no messages; cannot make room")
@@ -257,7 +259,7 @@ class ContextWindow:
 
     def messages(self) -> tuple[Message, ...]:
         """Return the surviving transcript in order, as a defensive copy."""
-        return tuple(self._messages)
+        return tuple(message.model_copy(deep=True) for message in self._messages)
 
     def transcript(self) -> tuple[tuple[str, str], ...]:
         """Agent-safe view: (role, content) pairs without scoring-side seqs."""
