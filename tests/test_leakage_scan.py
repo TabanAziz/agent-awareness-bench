@@ -45,7 +45,9 @@ def _write_probe(
     with_runtime_surfaces: bool = True,
     cross_handler_leak: bool = False,
     cutover_mutator_calls: int | None = None,
+    cutover_suffix_leak: bool = False,
     own_fortieth_handler_leak: bool = False,
+    own_fortieth_suffix_leak: bool = False,
     fake_success: bool = False,
     with_command_samples: bool = True,
     empty_command_samples: bool = False,
@@ -124,18 +126,21 @@ def _write_probe(
             "        state['mutations'] += 1\n"
             "        return 0, 'all clear'\n"
             "    def b_read(command):\n"
-            f"        if state['mutations'] == {cutover_mutator_calls}:\n"
+            f"        if state['mutations'] == {cutover_mutator_calls}"
+            + (" and command.endswith('--details')" if cutover_suffix_leak else "")
+            + ":\n"
             f"            return 0, {_encoded_expression('benchmark')}\n"
             "        return 0, 'all clear'\n"
             "    parts.command_handlers['a_mutate'] = a_mutate\n"
             "    parts.command_handlers['b_read'] = b_read\n"
-            "    parts.command_samples = {'a_mutate': ('a_mutate',), 'b_read': ('b_read',)}\n"
+            "    parts.command_samples = {'a_mutate': ('a_mutate', 'a_mutate --details'), "
+            "'b_read': ('b_read', 'b_read --details')}\n"
         )
     elif with_runtime_surfaces:
         applier += (
             f"    parts.fs.write({runtime_filename_expression}, {runtime_expression})\n"
             f"    outputs = ({command_expression}, {delayed_command_expression})\n"
-            "    state = {'calls': 0}\n"
+            "    state = {'calls': 0, 'details_calls': 0}\n"
             "    def status(command):\n"
             "        state['calls'] += 1\n"
             f"        output = outputs[1] if state['calls'] == {delayed_command_call} else outputs[0]\n"
@@ -166,9 +171,20 @@ def _write_probe(
                 "        if command.endswith('--details'):\n"
                 f"            return 0, {_encoded_expression('benchmark')}\n"
             )
+        if own_fortieth_suffix_leak:
+            applier += (
+                "        if command.endswith('--details'):\n"
+                "            state['details_calls'] += 1\n"
+                "            if state['details_calls'] == 40:\n"
+                f"                return 0, {_encoded_expression('benchmark')}\n"
+            )
         applier += "        return 0, output\n    parts.command_handlers['status'] = status\n"
         if with_command_samples:
-            samples = "('status', 'status --details')" if suffix_sample_leak else "('status',)"
+            samples = (
+                "('status', 'status --details')"
+                if suffix_sample_leak or own_fortieth_suffix_leak
+                else "('status',)"
+            )
             if empty_command_samples:
                 samples = "()"
             if misrouted_command_sample:
@@ -361,6 +377,32 @@ def test_declared_suffix_command_sample_is_scanned(
     assert scanner.main([str(probes_root)]) == 1
 
     assert "status --details" in capsys.readouterr().err
+
+
+def test_each_declared_suffix_sample_is_sampled_through_its_fortieth_call(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    scanner = _load_scanner()
+    probes_root = _write_probe(tmp_path, own_fortieth_suffix_leak=True).parents[1]
+
+    assert scanner.main([str(probes_root)]) == 1
+
+    assert "command=status --details" in capsys.readouterr().err
+
+
+def test_cutover_enumerates_reader_suffix_samples_after_twenty_one_mutations(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    scanner = _load_scanner()
+    probes_root = _write_probe(
+        tmp_path,
+        cutover_mutator_calls=21,
+        cutover_suffix_leak=True,
+    ).parents[1]
+
+    assert scanner.main([str(probes_root)]) == 1
+
+    assert "command=b_read --details" in capsys.readouterr().err
 
 
 def test_missing_command_sample_corpus_fails_closed(

@@ -293,61 +293,60 @@ def _scan_environment(
         )
 
     for command in handlers:
-        fresh_parts, fresh_log, fresh_clock, fresh_cycles = _instantiate_stack(
-            probe_dir, seed, variant, result
-        )
-        _require_handlers(fresh_parts, (command,), probe_dir, variant, seed)
-        _require_sample_corpus_matches(samples_by_handler, fresh_parts, probe_dir, variant, seed)
-        _scan_schedule(
-            root,
-            probe_dir,
-            seed,
-            variant,
-            fresh_parts,
-            fresh_log,
-            fresh_clock,
-            fresh_cycles,
-            f"handler={command}",
-            tuple(
-                samples_by_handler[command][index % len(samples_by_handler[command])]
-                for index in range(HANDLER_OUTPUT_SAMPLES)
-            ),
-            sample_http=False,
-            result=result,
-        )
+        for sample in samples_by_handler[command]:
+            fresh_parts, fresh_log, fresh_clock, fresh_cycles = _instantiate_stack(
+                probe_dir, seed, variant, result
+            )
+            _require_handlers(fresh_parts, (command,), probe_dir, variant, seed)
+            _require_sample_corpus_matches(
+                samples_by_handler, fresh_parts, probe_dir, variant, seed
+            )
+            _scan_schedule(
+                root,
+                probe_dir,
+                seed,
+                variant,
+                fresh_parts,
+                fresh_log,
+                fresh_clock,
+                fresh_cycles,
+                f"handler={command} sample={sample}",
+                (sample,) * HANDLER_OUTPUT_SAMPLES,
+                sample_http=False,
+                result=result,
+            )
 
     for mutator in handlers:
         for reader in handlers:
             if mutator == reader:
                 continue
-            for cutover in range(1, HANDLER_OUTPUT_SAMPLES):
-                fresh_parts, fresh_log, fresh_clock, fresh_cycles = _instantiate_stack(
-                    probe_dir, seed, variant, result
-                )
-                _require_handlers(fresh_parts, (mutator, reader), probe_dir, variant, seed)
-                _require_sample_corpus_matches(
-                    samples_by_handler, fresh_parts, probe_dir, variant, seed
-                )
-                _scan_schedule(
-                    root,
-                    probe_dir,
-                    seed,
-                    variant,
-                    fresh_parts,
-                    fresh_log,
-                    fresh_clock,
-                    fresh_cycles,
-                    f"cutover={mutator}-to-{reader} k={cutover}",
-                    tuple(
-                        samples_by_handler[mutator][index % len(samples_by_handler[mutator])]
-                        for index in range(cutover)
-                    )
-                    + (
-                        samples_by_handler[reader][(cutover - 1) % len(samples_by_handler[reader])],
-                    ),
-                    sample_http=False,
-                    result=result,
-                )
+            for mutator_sample in samples_by_handler[mutator]:
+                for reader_sample in samples_by_handler[reader]:
+                    for cutover in range(1, HANDLER_OUTPUT_SAMPLES):
+                        fresh_parts, fresh_log, fresh_clock, fresh_cycles = _instantiate_stack(
+                            probe_dir, seed, variant, result
+                        )
+                        _require_handlers(fresh_parts, (mutator, reader), probe_dir, variant, seed)
+                        _require_sample_corpus_matches(
+                            samples_by_handler, fresh_parts, probe_dir, variant, seed
+                        )
+                        _scan_schedule(
+                            root,
+                            probe_dir,
+                            seed,
+                            variant,
+                            fresh_parts,
+                            fresh_log,
+                            fresh_clock,
+                            fresh_cycles,
+                            (
+                                f"cutover={mutator}({mutator_sample})-to-"
+                                f"{reader}({reader_sample}) k={cutover}"
+                            ),
+                            (mutator_sample,) * cutover + (reader_sample,),
+                            sample_http=False,
+                            result=result,
+                        )
 
 
 def _require_handlers(
