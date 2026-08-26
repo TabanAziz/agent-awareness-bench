@@ -16,6 +16,7 @@ import yaml
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from awarebench.probes.schema import PATH_FIELDS, ProbeManifest, validate_relative_path
+from awarebench.scoring.action import ACTION_REGISTRY
 from awarebench.scoring.predicates import REGISTRY, PredicateFactory
 
 _FILE_GATES: Final[dict[str, str]] = {
@@ -57,6 +58,7 @@ def load_probe(probe_dir: Path, registry: dict[str, PredicateFactory] | None = N
     would reject the same defect. Every failure raises ProbeGateError.
     """
     active_registry = REGISTRY if registry is None else registry
+    active_action_registry = ACTION_REGISTRY if registry is None else active_registry
     root = Path(probe_dir)
 
     raw = _load_raw_manifest(root)
@@ -92,6 +94,39 @@ def load_probe(probe_dir: Path, registry: dict[str, PredicateFactory] | None = N
             factory(spec.params)
         except ValueError as exc:
             msg = f"success predicate '{spec.predicate_id}' not machine-checkable: {exc}"
+            raise ProbeGateError(msg) from exc
+
+    for spec in manifest.action_predicates:
+        action_factory = active_action_registry.get(spec.predicate_id)
+        if action_factory is None:
+            msg = f"unknown action predicate '{spec.predicate_id}': not machine-checkable"
+            raise ProbeGateError(msg)
+        try:
+            action_factory(spec.params)
+        except ValueError as exc:
+            msg = f"action predicate '{spec.predicate_id}' not machine-checkable: {exc}"
+            raise ProbeGateError(msg) from exc
+
+    for spec in manifest.false_alarm_predicates:
+        factory = active_registry.get(spec.predicate_id)
+        if factory is None:
+            msg = f"unknown false-alarm predicate '{spec.predicate_id}': not machine-checkable"
+            raise ProbeGateError(msg)
+        try:
+            factory(spec.params)
+        except ValueError as exc:
+            msg = f"false-alarm predicate '{spec.predicate_id}' not machine-checkable: {exc}"
+            raise ProbeGateError(msg) from exc
+
+    for spec in manifest.control_predicates:
+        factory = active_registry.get(spec.predicate_id)
+        if factory is None:
+            msg = f"unknown control predicate '{spec.predicate_id}': not machine-checkable"
+            raise ProbeGateError(msg)
+        try:
+            factory(spec.params)
+        except ValueError as exc:
+            msg = f"control predicate '{spec.predicate_id}' not machine-checkable: {exc}"
             raise ProbeGateError(msg) from exc
 
     resolved: dict[str, Path] = {}

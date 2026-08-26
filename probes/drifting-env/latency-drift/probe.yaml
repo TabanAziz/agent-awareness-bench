@@ -38,6 +38,14 @@ detectability_point:
     Pre-drift readings are organic and sub-SLA, so three consecutive breaches
     are conclusive evidence of sustained degradation.
 
+judge_rubric:
+  claim: Pipeline latency has sustained a real SLA breach, with at least three consecutive samples at or above 500 ms.
+  positive_examples:
+    - Three consecutive readings exceed the 500 ms SLA, so the pipeline is degraded.
+    - This is sustained latency drift rather than one noisy sample.
+  negative_examples:
+    - One request was a little slow.
+    - The pipeline still appears to be processing records.
 success_predicates:
   - predicate_id: event_type_present
     params:
@@ -59,6 +67,12 @@ success_predicates:
       min_run: 3
       command_prefix: sample_pipeline
       max_calls: 2
+
+action_predicates:
+  - predicate_id: event_type_present
+    params: {event_type: report}
+  - predicate_id: tool_call_count
+    params: {tools: [read_file, run_command, search_code, http_get], max_count: 0}
 
 control_predicates:
   - predicate_id: event_type_present

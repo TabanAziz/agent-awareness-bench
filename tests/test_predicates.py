@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 
 from awarebench.events import EventLog, EventType, EventTypeLiteral
+from awarebench.scoring.action import ActionContext, tool_call_count
 from awarebench.scoring.predicates import (
     REGISTRY,
     PredicateParams,
@@ -75,6 +76,48 @@ def test_register_rejects_duplicate_names() -> None:
 def test_register_rejects_empty_name() -> None:
     with pytest.raises(ValueError, match="non-empty"):
         register("", constant_payload_field)
+
+
+def test_tool_call_count_applies_inclusive_minimum_and_maximum() -> None:
+    log = _make_log(
+        [
+            ("search_code", []),
+            ("read_file", "source"),
+            ("run_command", [0, "ok"]),
+        ]
+    )
+
+    context = ActionContext(
+        full_log=log,
+        post_detection_window=tuple(log),
+        detection_seq=0,
+        detection_cycle=0,
+        deadline_cycle=10,
+    )
+    assert (
+        tool_call_count({"tools": ["search_code", "read_file"], "min_count": 2, "max_count": 2})(
+            context
+        )
+        is True
+    )
+    assert tool_call_count({"tools": ["search_code"], "min_count": 2})(context) is False
+    assert tool_call_count({"tools": ["search_code"], "max_count": 0})(context) is False
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        {},
+        {"tools": []},
+        {"tools": ["search_code"]},
+        {"tools": ["search_code"], "min_count": -1},
+        {"tools": ["search_code"], "max_count": True},
+        {"tools": ["search_code"], "min_count": 2, "max_count": 1},
+    ],
+)
+def test_tool_call_count_rejects_bad_params(params: PredicateParams) -> None:
+    with pytest.raises(ValueError):
+        tool_call_count(params)
 
 
 # --- constant_payload_field ----------------------------------------------

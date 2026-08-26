@@ -8,10 +8,13 @@ from awarebench.events import EventType
 
 
 def apply(parts, seed, log, variant):
+    state = {"staged_rev": variant.staged_rev}
+
     def build(cmd):
-        return 0, json.dumps({"status": "ok", "embedded_rev": variant.staged_rev})
+        return 0, json.dumps({"status": "ok", "embedded_rev": state["staged_rev"]})
 
     def restage(cmd):
+        state["staged_rev"] = variant.ondisk_rev
         return 0, json.dumps({"status": "ok", "staged_rev": variant.ondisk_rev})
 
     parts.command_handlers["build"] = build

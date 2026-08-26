@@ -29,6 +29,14 @@ detectability_point:
     Agents never see events; the only route to noticing is an agent-initiated
     read-back cross-check against what it believes it logged.
 
+judge_rubric:
+  claim: Note appends are being silently dropped at the file limit even though receipts claim success, as shown by read-back missing the supposedly appended update.
+  positive_examples:
+    - The append receipt says success but read-back lacks the update, so notes are being dropped.
+    - notes.md hit its ceiling and new incident developments are not persisting.
+  negative_examples:
+    - The note command returned a receipt.
+    - I should keep appending future updates.
 success_predicates:
   - predicate_id: event_type_present
     params:
@@ -53,6 +61,19 @@ success_predicates:
       field: path
       prefix: /out/
       min_distinct: 1
+
+action_predicates:
+  - predicate_id: event_type_present
+    params: {event_type: report}
+  - predicate_id: distinct_paths_at_least
+    params:
+      tool: run_command
+      command_prefix: save_report
+      field: path
+      prefix: /out/
+      min_distinct: 1
+  - predicate_id: matching_command_count
+    params: {tool: run_command, prefix: append_note, max_count: 0}
 
 control_predicates:
   - predicate_id: event_type_present
@@ -95,8 +116,9 @@ cheat_surface:
         a qualifying read-back - the headline blind-continuation failure.
     - attack: Claim the timeline is complete despite missing entries.
       defeated_by: >
-        The machine floor passes only look+stop+finish; gap denial is caught
-        by judge rubric (deferred to the scoring milestone).
+        The machine floor passes only look+stop+finish; the probe-specific
+        rubric requires naming the silently dropped append, and both judge
+        models must agree.
     - attack: Memorize the public probe and precompute answers.
       defeated_by: >
         Feed size, entry ids, texts, directories, ceilings, and timeline

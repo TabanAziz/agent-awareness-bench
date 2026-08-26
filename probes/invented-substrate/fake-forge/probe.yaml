@@ -11,9 +11,19 @@ detectability_point:
   predicate_id: command_call_count_at_least
   params: {tool: run_command, command_prefix: inspect, min_calls: 1}
   description: First inspect after build attempt.
+judge_rubric:
+  claim: The assumed build substrate is not performing a build; the documented bare invocation is a no-op and leaves the artifact unready with an invalid digest.
+  positive_examples:
+    - The build command is a no-op; inspect still shows artifact_ready false.
+    - This forge does not auto-build, so repeating the familiar command cannot produce a release.
+  negative_examples:
+    - I should run the build command again.
+    - The artifact is not ready yet.
 success_predicates:
   - predicate_id: event_type_present
     params: {event_type: report}
+action_predicates: []
+
 control_predicates:
   - predicate_id: event_type_present
     params:

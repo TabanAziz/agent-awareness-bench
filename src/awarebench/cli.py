@@ -2,7 +2,8 @@
 
 Exit codes: 0 for a completed harness run, 2 when the probe loader rejects the
 manifest (ProbeGateError), usage is invalid, or the target run already exists;
-3 for unexpected exceptions (traceback on stderr).
+3 for unexpected exceptions (traceback on stderr); 4 for judge transport or
+response failures.
 """
 
 from __future__ import annotations
@@ -11,8 +12,10 @@ import argparse
 import hashlib
 import importlib.util
 import re
+import shlex
 import sys
 import traceback
+from datetime import date
 from pathlib import Path
 from types import ModuleType
 from typing import Final
@@ -35,6 +38,17 @@ from awarebench.probes.loader import LoadedProbe, ProbeGateError, load_probe
 from awarebench.report import build_report
 from awarebench.scoring.evaluate import evaluate
 from awarebench.scoring.evaluate import passed as all_predicates_pass
+from awarebench.scoring.judge import (
+    JudgeError,
+    NamedJudge,
+    canonical_judge_model,
+    judge_event_log,
+)
+from awarebench.scoring.judge_validation import (
+    capture_validation_corpus,
+    load_validation_labels,
+    write_validation_corpus,
+)
 
 DEFAULT_CONTEXT_TOKENS: Final[int] = 16_384
 MAX_SEED: Final[int] = (1 << 63) - 1
@@ -86,13 +100,49 @@ def main(argv: list[str] | None = None) -> int:
         "without it the stub repeats a malformed placeholder and exhausts.",
     )
 
+    judge_parser = subparsers.add_parser(
+        "judge", help="Judge whether one completed run named the actual problem."
+    )
+    judge_parser.add_argument("probe_dir", type=Path)
+    judge_parser.add_argument("--events", type=Path, required=True)
+    judge_parser.add_argument(
+        "--judge-model",
+        action="append",
+        default=[],
+        help="Exactly two distinct vendor:model-id specifications.",
+    )
+    judge_parser.add_argument("--action-window-k", type=int, default=3)
+    judge_parser.add_argument("--out", type=Path, required=True)
+
+    capture_parser = subparsers.add_parser(
+        "judge-validation-capture",
+        help="Capture two isolated judge requests per frozen human-labelled excerpt.",
+    )
+    capture_parser.add_argument("labels", type=Path)
+    capture_parser.add_argument("--probes-dir", type=Path, default=Path("probes"))
+    capture_parser.add_argument(
+        "--judge-model",
+        action="append",
+        default=[],
+        help="Exactly two distinct vendor:model-id specifications.",
+    )
+    capture_parser.add_argument("--judged-at", type=date.fromisoformat, required=True)
+    capture_parser.add_argument("--out", type=Path, required=True)
+
     args = parser.parse_args(argv)
 
     try:
+        if args.command == "judge":
+            return _judge_command(args)
+        if args.command == "judge-validation-capture":
+            return _judge_validation_capture_command(args)
         return _run_command(args)
     except ProbeGateError as exc:
         print(f"probe rejected: {exc}", file=sys.stderr)
         return 2
+    except JudgeError as exc:
+        print(f"judge failed: {exc}", file=sys.stderr)
+        return 4
     except Exception:  # noqa: BLE001 -- CLI boundary turns crashes into exit code 3
         traceback.print_exc()
         return 3
@@ -238,6 +288,136 @@ def _run_command(args: argparse.Namespace) -> int:
         f"tokens={snapshot['prompt_tokens']}+{snapshot['completion_tokens']} "
         f"passed={all_predicates_pass(score)}"
     )
+    return 0
+
+
+def _judge_command(args: argparse.Namespace) -> int:
+    requested_models: list[str] = args.judge_model
+    if len(requested_models) != 2:
+        print("exactly two --judge-model values are required", file=sys.stderr)
+        return 2
+    try:
+        models = [canonical_judge_model(model) for model in requested_models]
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    if models[0] == models[1]:
+        print("--judge-model values must be distinct", file=sys.stderr)
+        return 2
+    if (
+        isinstance(args.action_window_k, bool)
+        or not isinstance(args.action_window_k, int)
+        or args.action_window_k < 1
+    ):
+        print("--action-window-k must be >= 1", file=sys.stderr)
+        return 2
+    if not args.events.is_file():
+        print(f"events file not found: {args.events}", file=sys.stderr)
+        return 2
+    if args.out.exists():
+        print(f"judge output already exists: {args.out}", file=sys.stderr)
+        return 2
+    try:
+        adapters = [_build_judge_adapter(model) for model in models]
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    loaded = load_probe(args.probe_dir)
+    log = EventLog.read_jsonl(args.events)
+    result = judge_event_log(
+        loaded,
+        log,
+        judges=(
+            NamedJudge(models[0], adapters[0]),
+            NamedJudge(models[1], adapters[1]),
+        ),
+        action_window_k=args.action_window_k,
+    )
+    result.write_json(args.out)
+    detection = "unresolved" if result.detected is None else str(result.detected).lower()
+    detection_latency = (
+        "unavailable" if result.detection_latency is None else str(result.detection_latency)
+    )
+    action_gap = "unavailable" if result.action_gap is None else str(result.action_gap)
+    print(
+        f"detection={detection} detection_latency={detection_latency} action_gap={action_gap} "
+        f"judge_disagreement_rate={result.disagreement_rate}"
+    )
+    return 0
+
+
+def _build_judge_adapter(model_spec: str) -> ModelAdapter:
+    backend, separator, model_id = model_spec.partition(":")
+    if not separator or not model_id.strip():
+        raise ValueError("judge models must use vendor:model-id syntax")
+    model_id = model_id.strip()
+    if backend == "anthropic":
+        return AnthropicAdapter(model=model_id)
+    if backend == "openai":
+        return OpenAIAdapter(model=model_id)
+    if backend == "openrouter":
+        return OpenRouterAdapter(model=model_id)
+    raise ValueError(f"unsupported judge model backend: {backend}")
+
+
+def _judge_validation_capture_command(args: argparse.Namespace) -> int:
+    requested_models: list[str] = args.judge_model
+    if len(requested_models) != 2:
+        print("exactly two --judge-model values are required", file=sys.stderr)
+        return 2
+    try:
+        models = [canonical_judge_model(model) for model in requested_models]
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    if models[0] == models[1]:
+        print("--judge-model values must be distinct", file=sys.stderr)
+        return 2
+    if not args.labels.is_file():
+        print(f"validation labels file not found: {args.labels}", file=sys.stderr)
+        return 2
+    if args.out.exists():
+        print(f"judge validation output already exists: {args.out}", file=sys.stderr)
+        return 2
+    probe_paths = sorted(args.probes_dir.glob("*/*/probe.yaml"))
+    if not probe_paths:
+        print(f"no probe manifests found under: {args.probes_dir}", file=sys.stderr)
+        return 2
+    try:
+        adapters = [_build_judge_adapter(model) for model in models]
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    loaded = [load_probe(path.parent) for path in probe_paths]
+    rubrics = {probe.manifest.id: probe.manifest.judge_rubric for probe in loaded}
+    labels = load_validation_labels(args.labels)
+    capture_argv = [
+        "awarebench",
+        "judge-validation-capture",
+        args.labels.as_posix(),
+        "--probes-dir",
+        args.probes_dir.as_posix(),
+        "--judge-model",
+        models[0],
+        "--judge-model",
+        models[1],
+        "--judged-at",
+        args.judged_at.isoformat(),
+        "--out",
+        args.out.as_posix(),
+    ]
+    cases = capture_validation_corpus(
+        labels,
+        rubrics,
+        judges=(
+            NamedJudge(models[0], adapters[0]),
+            NamedJudge(models[1], adapters[1]),
+        ),
+        judged_at=args.judged_at,
+        capture_command=shlex.join(capture_argv),
+    )
+    write_validation_corpus(cases, args.out)
+    print(f"captured={len(cases)} judge_requests={len(cases) * 2}")
     return 0
 
 

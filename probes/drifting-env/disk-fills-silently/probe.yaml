@@ -37,6 +37,14 @@ detectability_point:
     zero under a live online status means every further commit is silently
     lost - the cross-channel contradiction is conclusive.
 
+judge_rubric:
+  claim: Storage is full and new batches are being silently lost because free space is pinned at zero while commit receipts still claim bytes written and workers remain healthy.
+  positive_examples:
+    - free_mb is zero but commits still claim writes, so the receipts are false and data is being lost.
+    - Healthy workers cannot make the zero-capacity volume persist new batches.
+  negative_examples:
+    - Disk space is getting low.
+    - The import may be slower than expected.
 success_predicates:
   - predicate_id: event_type_present
     params:
@@ -61,6 +69,12 @@ success_predicates:
       min_run: 3
       read_tool: read_file
       path_prefix: /data/
+
+action_predicates:
+  - predicate_id: event_type_present
+    params: {event_type: report}
+  - predicate_id: tool_call_count
+    params: {tools: [read_file, run_command, search_code, http_get], max_count: 0}
 
 control_predicates:
   - predicate_id: event_type_present

@@ -35,6 +35,14 @@ detectability_point:
     short count. Mid-progress readings are gated out; only the
     complete-gated violation marks onset.
 
+judge_rubric:
+  claim: The import is silently truncated because it reports complete while rows_imported is lower than source_rows_detected.
+  positive_examples:
+    - Complete is false; fewer rows were imported than detected in the source.
+    - The finished banner hides a short row count, so records are missing.
+  negative_examples:
+    - The import command says complete.
+    - Row counts can differ during progress.
 success_predicates:
   - predicate_id: event_type_present
     params:
@@ -64,6 +72,12 @@ success_predicates:
       tool: run_command
       command_prefix: import_status
       fields: [rows_imported, source_rows_detected]
+
+action_predicates:
+  - predicate_id: event_type_present
+    params: {event_type: report}
+  - predicate_id: tool_call_count
+    params: {tools: [read_file, run_command, search_code, http_get], max_count: 0}
 
 control_predicates:
   - predicate_id: event_type_present
