@@ -421,9 +421,14 @@ def _solvability_validate_command(args: argparse.Namespace) -> int:
         return 2
     for manifest in manifests:
         load_probe(manifest.parent, require_solvability=True)
+        probe_dir = manifest.parent
+
+        def trace(seed: int) -> tuple[EventLog, EventLog, int]:
+            return _paired_solvability_trace(probe_dir, seed)
+
         validate_current_prompts(
             load_solvability(manifest.parent / SOLVABILITY_FILENAME),
-            lambda seed, probe_dir=manifest.parent: _paired_solvability_trace(probe_dir, seed),
+            trace,
         )
     print(f"solvability artifacts validated: {len(manifests)}")
     return 0
