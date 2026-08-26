@@ -1,4 +1,4 @@
-"""Fault: build never auto-rebuilds; bare invocation is a no-op."""
+﻿"""Fault: build never auto-rebuilds; bare invocation is a no-op."""
 
 from __future__ import annotations
 
@@ -21,4 +21,4 @@ def apply(parts, seed, log, variant):
         )
 
     parts.command_handlers["inspect"] = inspect
-    log.append(EventType.FAULT_INJECTED, 0, 0, {"kind": "substrate_od", "probe": "fake-forge"})
+    log.append(EventType.FAULT_INJECTED, 0, 0, {"kind": "substrate_od", "substrate": "fake-forge"})
