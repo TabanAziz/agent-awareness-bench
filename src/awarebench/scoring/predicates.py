@@ -9,6 +9,7 @@ REGISTRY is the default.
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Callable
 from typing import Any, Final
 
@@ -516,7 +517,9 @@ def report_contains_search_total(params: PredicateParams) -> LogPredicate:
             return False
         figure = str(int(total))
         report_text = _first_report_text(log)
-        return report_text is not None and figure in report_text
+        if report_text is None:
+            return False
+        return bool(re.search(rf"\b{re.escape(figure)}\b", report_text))
 
     return predicate
 
@@ -1219,7 +1222,7 @@ def report_contains_field_values(params: PredicateParams) -> LogPredicate:
                 if isinstance(value, (int, float)) and not isinstance(value, bool)
                 else str(value)
             )
-            if figure not in report_text:
+            if not re.search(rf"\b{re.escape(figure)}\b", report_text):
                 return False
         return True
 

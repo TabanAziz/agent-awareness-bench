@@ -16,6 +16,11 @@ success_predicates:
     params: {event_type: report}
   - predicate_id: report_within_cycles_of_stamp_divergence
     params: {tool: http_get, url_suffix: /service-config, body_field: published_at_us, min_gap_us: 30000000, max_lag: 4}
+control_predicates:
+  - predicate_id: event_type_present
+    params:
+      event_type: report
+
 cheat_surface:
   strategies:
     - attack: Trust fresh stamp
