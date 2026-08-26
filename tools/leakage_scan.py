@@ -1,100 +1,208 @@
-"""Scans agent-visible surfaces for evaluation-revealing vocabulary.
-
-Scans ONLY the task text from probe.yaml (the sole string that reaches the
-agent via the system prompt) and string literals in generator/injection/
-control source code that produce handler stdout.
-
-Exit code 0 = clean; 1 = leaks found (each printed to stderr).
-"""
+"""Fail-closed scan of repository and agent-visible leakage surfaces."""
 
 from __future__ import annotations
 
+import getpass
 import re
 import sys
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Final, TextIO
 
-try:
-    import yaml
-except ImportError:
-    yaml = None
+import yaml
 
-LEAK_PATTERNS: list[tuple[str, str]] = [
-    ("benchmark", r"\bbenchmark\b"),
-    ("probe", r"\bprobe\b"),
-    ("injected", r"\binjected\b"),
-    ("ground_truth", r"\bground[_\s]?truth\b"),
-    ("awarebench", r"\bawarebench\b"),
-    ("awareness_scored", r"\bawareness[_\s]score\b"),
-]
+from awarebench.cli import _build_stack
+from awarebench.events import EventLog
+from awarebench.harness.clock import CycleCounter, VirtualClock
+from awarebench.probes.loader import ProbeGateError, load_probe
+
+SEEDS: Final[tuple[int, ...]] = (0, 1, 2)
+VARIANTS: Final[tuple[str, ...]] = ("fault", "control")
+IGNORED_DIRECTORIES: Final[frozenset[str]] = frozenset(
+    {".git", ".local", ".mypy_cache", ".pytest_cache", ".ruff_cache", ".venv", "__pycache__"}
+)
+LEAK_PATTERNS: Final[tuple[tuple[str, re.Pattern[str]], ...]] = (
+    ("benchmark", re.compile(r"\bbenchmark\b", re.IGNORECASE)),
+    ("probe", re.compile(r"\bprobe\b", re.IGNORECASE)),
+    ("injected", re.compile(r"\binjected\b", re.IGNORECASE)),
+    ("ground_truth", re.compile(r"\bground[_\s]?truth\b", re.IGNORECASE)),
+    ("awarebench", re.compile(r"\bawarebench\b", re.IGNORECASE)),
+    ("awareness_scored", re.compile(r"\bawareness[_\s]score\b", re.IGNORECASE)),
+)
+LOCAL_PATH_PATTERNS: Final[tuple[tuple[str, re.Pattern[str]], ...]] = (
+    ("local_path", re.compile(re.escape("/" + "home" + "/"), re.IGNORECASE)),
+    ("local_path", re.compile(re.escape("/" + "Users" + "/"), re.IGNORECASE)),
+    ("local_path", re.compile(re.escape("C" + ":" + "\\"), re.IGNORECASE)),
+    ("local_path", re.compile(re.escape("~" + "/"))),
+)
 
 
-def _check_text(text: str, source: str) -> list[str]:
-    lowered = text.lower()
+class ScanError(RuntimeError):
+    """The scan could not inspect a required surface."""
+
+
+@dataclass
+class ScanResult:
+    """All scanner observations, including no-op-proof coverage counts."""
+
+    files_inspected: int = 0
+    probes_inspected: int = 0
+    environments_inspected: int = 0
+    runtime_files_inspected: int = 0
+    command_outputs_inspected: int = 0
+    leaks: list[str] = field(default_factory=list)
+
+
+def _check_text(
+    text: str,
+    source: str,
+    patterns: tuple[tuple[str, re.Pattern[str]], ...],
+) -> list[str]:
     return [
         f"{source}: pattern '{label}' matched"
-        for label, pattern in LEAK_PATTERNS
-        if re.search(pattern, lowered)
+        for label, pattern in patterns
+        if pattern.search(text)
     ]
 
 
-def _extract_task_text(manifest_path: Path) -> str:
-    """Extract only the agent-visible task field from probe.yaml."""
-    if yaml is None:
-        return ""
+def _repository_files(root: Path) -> list[Path]:
+    """Return every regular repository file except generated local state."""
+    return sorted(
+        path
+        for path in root.rglob("*")
+        if path.is_file()
+        and not any(part in IGNORED_DIRECTORIES for part in path.relative_to(root).parts)
+    )
+
+
+def _scan_local_paths(root: Path, result: ScanResult) -> None:
+    """Scan all repository text, not only probe artifacts, for machine identity."""
+    identifiers = tuple(
+        identifier.casefold()
+        for identifier in (getpass.getuser(), root.parent.name)
+        if identifier
+    )
+    for path in _repository_files(root):
+        result.files_inspected += 1
+        try:
+            text = path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            continue
+        except OSError as exc:
+            raise ScanError(f"cannot read repository file {path}: {exc}") from exc
+        result.leaks.extend(_check_text(text, str(path), LOCAL_PATH_PATTERNS))
+        lowered = text.casefold()
+        for identifier in identifiers:
+            if identifier in lowered:
+                result.leaks.append(f"{path}: pattern 'local_identity' matched")
+
+
+def _task_text(manifest_path: Path) -> str:
+    """Read task text and make malformed manifests terminal scanner errors."""
     try:
         data = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
-        if isinstance(data, dict):
-            return str(data.get("task", ""))
     except (OSError, UnicodeError, yaml.YAMLError) as exc:
-        raise RuntimeError(f"cannot read manifest: {manifest_path}") from exc
-    return ""
+        raise ScanError(f"cannot parse manifest {manifest_path}: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ScanError(f"cannot parse manifest {manifest_path}: expected a mapping")
+    task = data.get("task")
+    return task if isinstance(task, str) else ""
 
 
-def _extract_handler_strings(py_path: Path) -> str:
-    """Extract string literals from injection.py and control.py that become stdout."""
-    if not py_path.exists():
-        return ""
-    content = py_path.read_text(encoding="utf-8")
-    # Extract JSON dump values and f-string content that becomes stdout
-    strings = re.findall(r'"([^"]*)"', content)
-    return " ".join(strings).lower()
+def _scan_environment(
+    probe_dir: Path,
+    seed: int,
+    variant: str,
+    result: ScanResult,
+) -> None:
+    """Construct one agent-visible environment and scan its files and commands."""
+    try:
+        loaded = load_probe(probe_dir)
+        log = EventLog()
+        clock = VirtualClock()
+        cycles = CycleCounter()
+        parts = _build_stack(loaded, log, clock, cycles, seed=seed, variant=variant)
+    except (ImportError, OSError, ProbeGateError, RuntimeError, ValueError) as exc:
+        raise ScanError(
+            f"cannot instantiate {probe_dir} ({variant}, seed {seed}): {exc}"
+        ) from exc
+
+    result.environments_inspected += 1
+    source = f"{probe_dir} [runtime {variant} seed={seed}]"
+    for virtual_path in parts.fs.list_files():
+        content = parts.fs.read(virtual_path)
+        if content is None:
+            raise ScanError(f"runtime file disappeared in {probe_dir}: {virtual_path}")
+        result.runtime_files_inspected += 1
+        result.leaks.extend(_check_text(content, f"{source} {virtual_path}", LEAK_PATTERNS))
+
+    for command, handler in sorted(parts.command_handlers.items()):
+        try:
+            _exit_code, output = handler(command)
+        except Exception as exc:
+            raise ScanError(
+                f"cannot inspect command output for {probe_dir} ({variant}, seed {seed}, {command}): {exc}"
+            ) from exc
+        result.command_outputs_inspected += 1
+        result.leaks.extend(_check_text(output, f"{source} command={command}", LEAK_PATTERNS))
 
 
-def scan_probe(probe_dir: Path) -> list[str]:
-    """Scan all agent-visible surfaces of one probe directory."""
-    leaks: list[str] = []
-
-    # Scan task text (the primary agent-visible surface)
+def _scan_probe(probe_dir: Path, result: ScanResult) -> None:
     manifest_path = probe_dir / "probe.yaml"
-    if manifest_path.exists():
-        task_text = _extract_task_text(manifest_path)
-        if task_text:
-            leaks.extend(_check_text(task_text.lower(), f"{manifest_path} [task]"))
+    result.probes_inspected += 1
+    result.leaks.extend(_check_text(_task_text(manifest_path), f"{manifest_path} [task]", LEAK_PATTERNS))
+    for seed in SEEDS:
+        for variant in VARIANTS:
+            _scan_environment(probe_dir, seed, variant, result)
 
-    # Scan handler stdout templates from injection.py (the fault arm)
-    for role in ("injection",):
-        py_path = probe_dir / f"{role}.py"
-        if py_path.exists():
-            handler_strings = _extract_handler_strings(py_path)
-            leaks.extend(_check_text(handler_strings, f"{py_path} [stdout]"))
 
-    return leaks
+def scan_root(root: Path) -> ScanResult:
+    """Scan all local paths and every discovered probe's visible surfaces."""
+    root = root.resolve()
+    if not root.is_dir():
+        raise ScanError(f"scan root is not a directory: {root}")
+    result = ScanResult()
+    _scan_local_paths(root, result)
+    for manifest_path in sorted(root.rglob("probe.yaml")):
+        if any(part in IGNORED_DIRECTORIES for part in manifest_path.relative_to(root).parts):
+            continue
+        _scan_probe(manifest_path.parent, result)
+    return result
+
+
+def _report_counts(result: ScanResult, *, stream: TextIO) -> None:
+    print(
+        "inspected "
+        f"{result.files_inspected} files, {result.probes_inspected} probes, "
+        f"{result.environments_inspected} environments, "
+        f"{result.runtime_files_inspected} virtual files, and "
+        f"{result.command_outputs_inspected} command outputs.",
+        file=stream,
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Run the scanner, returning 0 clean, 1 leaks, or 2 inspection failure."""
     args = argv if argv is not None else sys.argv[1:]
-    probes_root = Path(args[0]) if args else Path("probes")
+    root = Path(args[0]) if args else Path.cwd()
+    try:
+        result = scan_root(root)
+    except ScanError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
 
-    all_leaks: list[str] = []
-    for probe_yaml in sorted(probes_root.rglob("probe.yaml")):
-        all_leaks.extend(scan_probe(probe_yaml.parent))
-
-    if all_leaks:
-        for leak in all_leaks:
+    if result.files_inspected == 0 or result.probes_inspected == 0:
+        _report_counts(result, stream=sys.stderr)
+        print("ERROR: scan inspected zero required files or probes.", file=sys.stderr)
+        return 2
+    if result.leaks:
+        for leak in result.leaks:
             print(f"LEAK: {leak}", file=sys.stderr)
-        print(f"\n{len(all_leaks)} leakage violation(s) found.", file=sys.stderr)
+        _report_counts(result, stream=sys.stderr)
+        print(f"{len(result.leaks)} leakage violation(s) found.", file=sys.stderr)
         return 1
 
+    _report_counts(result, stream=sys.stdout)
     print("Leakage scan clean.")
     return 0
 
