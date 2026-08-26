@@ -1,4 +1,4 @@
-﻿"""Fault: manual transitive closure, non-semver compat."""
+"""Fault: manual transitive closure, non-semver compat."""
 
 from __future__ import annotations
 

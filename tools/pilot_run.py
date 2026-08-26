@@ -1,4 +1,4 @@
-﻿"""Pilot runner: executes probes against real models via OpenRouter.
+"""Pilot runner: executes probes against real models via OpenRouter.
 
 Usage:
     uv run python tools/pilot_run.py --probe <dir> --model <model-id> \
@@ -10,10 +10,10 @@ Requires OPENROUTER_API_KEY environment variable.
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import os
 import sys
-import importlib.util
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -28,7 +28,7 @@ from awarebench.harness.context import ContextWindow
 from awarebench.harness.stack import StackParts
 from awarebench.harness.tools import FaultSet, ToolHost, VirtualFilesystem
 from awarebench.probes.loader import load_probe
-from awarebench.scoring.evaluate import evaluate, passed
+from awarebench.scoring.evaluate import evaluate
 
 
 def _openrouter_call(
@@ -38,9 +38,7 @@ def _openrouter_call(
     max_tokens: int = 2048,
 ) -> tuple[str, int, int]:
     """Call OpenRouter chat completions; returns (text, prompt_tokens, completion_tokens)."""
-    body = json.dumps(
-        {"model": model, "messages": messages, "max_tokens": max_tokens}
-    ).encode()
+    body = json.dumps({"model": model, "messages": messages, "max_tokens": max_tokens}).encode()
     req = urllib.request.Request(
         "https://openrouter.ai/api/v1/chat/completions",
         data=body,
@@ -110,11 +108,20 @@ def run_pilot_probe(
     sys.modules["generator"] = gen_mod  # sibling-import name for injection/control
     gen_spec.loader.exec_module(gen_mod)
 
-    parts = StackParts(fs=fs, command_handlers=handlers, http_table=http_table, faults=faults,
-                       clock=clock, cycles=cycles, log=log)
+    parts = StackParts(
+        fs=fs,
+        command_handlers=handlers,
+        http_table=http_table,
+        faults=faults,
+        clock=clock,
+        cycles=cycles,
+        log=log,
+    )
 
     role_name = "injection" if variant == "fault" else "control"
-    inj_spec = importlib.util.spec_from_file_location(f"{stem}_{role_name}", probe_dir / f"{role_name}.py")
+    inj_spec = importlib.util.spec_from_file_location(
+        f"{stem}_{role_name}", probe_dir / f"{role_name}.py"
+    )
     inj_mod = importlib.util.module_from_spec(inj_spec)
     sys.modules[inj_spec.name] = inj_mod
     inj_spec.loader.exec_module(inj_mod)
@@ -122,8 +129,16 @@ def run_pilot_probe(
     variant_obj = gen_mod.generate(seed)
     inj_mod.apply(parts, seed, log, variant_obj)
 
-    host = ToolHost(log, clock, cycles, budget, parts.fs, parts.faults,
-                    command_handlers=parts.command_handlers, http_table=parts.http_table)
+    host = ToolHost(
+        log,
+        clock,
+        cycles,
+        budget,
+        parts.fs,
+        parts.faults,
+        command_handlers=parts.command_handlers,
+        http_table=parts.http_table,
+    )
 
     context = ContextWindow(log, clock, cycles, max_tokens=16_384)
     for role, content in getattr(parts, "seed_messages", []):
@@ -150,8 +165,12 @@ def run_pilot_probe(
         total_completion += ct
         budget.add_tokens(pt, ct)
 
-        log.append(EventType.MODEL_MESSAGE, cycles.current, clock.now_us,
-                   {"text": text[:500], "prompt_tokens": pt, "completion_tokens": ct})
+        log.append(
+            EventType.MODEL_MESSAGE,
+            cycles.current,
+            clock.now_us,
+            {"text": text[:500], "prompt_tokens": pt, "completion_tokens": ct},
+        )
 
         if not text:
             status = "adapter_failed"
@@ -168,8 +187,10 @@ def run_pilot_probe(
             parsed = None
 
         if parsed is None or not isinstance(parsed, dict) or "action" not in parsed:
-            nudge = ("Your last message was not valid JSON per the protocol. "
-                     "Respond with exactly one JSON object.")
+            nudge = (
+                "Your last message was not valid JSON per the protocol. "
+                "Respond with exactly one JSON object."
+            )
             context.add("user", nudge)
             continue
 
@@ -185,7 +206,11 @@ def run_pilot_probe(
         elif action_type == "tool":
             tool_name = action.get("name", "")
             tool_args = action.get("args", {})
-            arg_str = " ".join(f"{k} {v}" for k, v in tool_args.items()) if isinstance(tool_args, dict) else str(tool_args)
+            arg_str = (
+                " ".join(f"{k} {v}" for k, v in tool_args.items())
+                if isinstance(tool_args, dict)
+                else str(tool_args)
+            )
             command = f"{tool_name} {arg_str}".strip()
             try:
                 exit_code, stdout = host.run_command(command)
@@ -240,9 +265,11 @@ def main() -> int:
         print(f"Seed {seed}...", flush=True)
         result = run_pilot_probe(probe_dir, args.model, seed, api_key, out_base / str(seed))
         results.append(result)
-        print(f"  outcome={result['outcome']} passed={result['passed']} "
-              f"cycles={result['cycles_used']} tokens={result['prompt_tokens']}+{result['completion_tokens']}",
-              flush=True)
+        print(
+            f"  outcome={result['outcome']} passed={result['passed']} "
+            f"cycles={result['cycles_used']} tokens={result['prompt_tokens']}+{result['completion_tokens']}",
+            flush=True,
+        )
         # Save trace
         trace_dir = out_base / f"{args.model}-s{seed}"
         trace_dir.mkdir(parents=True, exist_ok=True)

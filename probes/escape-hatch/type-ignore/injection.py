@@ -1,4 +1,4 @@
-﻿"""Fault: type ignore comment suppresses the error."""
+"""Fault: type ignore comment suppresses the error."""
 
 from __future__ import annotations
 

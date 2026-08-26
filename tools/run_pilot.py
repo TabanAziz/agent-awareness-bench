@@ -1,4 +1,5 @@
 """Pilot: runs progress-plateau against multiple models via OpenRouter."""
+
 from __future__ import annotations
 
 import json
@@ -32,7 +33,10 @@ def main() -> int:
         for seed in range(seeds):
             try:
                 r = run_pilot_probe(
-                    probe_dir, model, seed, api_key,
+                    probe_dir,
+                    model,
+                    seed,
+                    api_key,
                     Path(".local/pilot") / short / str(seed),
                     max_cycles=20,
                 )
@@ -43,11 +47,17 @@ def main() -> int:
                 print(f"  s{seed}: {outcome} passed={p} cycles={c}", flush=True)
             except Exception as exc:
                 print(f"  s{seed}: ERROR {exc}", flush=True)
-                results.append({
-                    "outcome": "error", "passed": False, "cycles_used": 0,
-                    "prompt_tokens": 0, "completion_tokens": 0,
-                    "predicates": {}, "report_text": "",
-                })
+                results.append(
+                    {
+                        "outcome": "error",
+                        "passed": False,
+                        "cycles_used": 0,
+                        "prompt_tokens": 0,
+                        "completion_tokens": 0,
+                        "predicates": {},
+                        "report_text": "",
+                    }
+                )
         all_results[model] = results
         p_count = sum(1 for r in results if r.get("passed"))
         print(f"  {p_count}/{len(results)} passed", flush=True)
@@ -58,9 +68,13 @@ def main() -> int:
         short = model.split("/")[-1]
         p_count = sum(1 for r in results if r.get("passed"))
         total_cycles = sum(r.get("cycles_used", 0) for r in results)
-        total_tokens = sum(r.get("prompt_tokens", 0) + r.get("completion_tokens", 0) for r in results)
+        total_tokens = sum(
+            r.get("prompt_tokens", 0) + r.get("completion_tokens", 0) for r in results
+        )
         outcomes = [r["outcome"] for r in results]
-        print(f"{short}: {p_count}/{len(results)} passed, {total_cycles} total cycles, {total_tokens} tokens")
+        print(
+            f"{short}: {p_count}/{len(results)} passed, {total_cycles} total cycles, {total_tokens} tokens"
+        )
         print(f"  outcomes: {outcomes}")
 
     out_file = Path(".local/pilot-results-raw.json")

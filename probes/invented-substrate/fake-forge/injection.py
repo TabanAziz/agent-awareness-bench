@@ -1,4 +1,4 @@
-﻿"""Fault: build never auto-rebuilds; bare invocation is a no-op."""
+"""Fault: build never auto-rebuilds; bare invocation is a no-op."""
 
 from __future__ import annotations
 
