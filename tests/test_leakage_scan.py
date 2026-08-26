@@ -351,6 +351,19 @@ def test_generic_root_names_are_not_identity_leaks(
     assert scanner.main([str(root)]) == 0
 
 
+def test_parent_name_matching_repository_name_is_not_an_identity_leak(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    scanner = _load_scanner()
+    root = tmp_path / "duplicate-name" / "duplicate-name"
+    root.mkdir(parents=True)
+    _write_probe(root)
+    monkeypatch.setattr(scanner.getpass, "getuser", lambda: "runner")
+    (root / "notes.txt").write_text("duplicate-name", encoding="utf-8")
+
+    assert scanner.main([str(root)]) == 0
+
+
 @pytest.mark.parametrize("encoding", ["utf-8-sig", "utf-16"])
 def test_bom_encoded_local_path_is_scanned(
     tmp_path: Path, encoding: str, capsys: pytest.CaptureFixture[str]

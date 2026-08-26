@@ -80,9 +80,10 @@ def _identity_patterns(root: Path) -> tuple[tuple[str, re.Pattern[str]], ...]:
     """Return bare-word patterns for non-generic local machine identities."""
     username = getpass.getuser().casefold()
     parent = root.parent.name.casefold()
+    repository_name = root.name.casefold()
     candidates = tuple(
         candidate
-        for candidate in (username, parent)
+        for candidate in (username, parent if parent != repository_name else "")
         if candidate and candidate not in GENERIC_IDENTITIES
     )
     return tuple(
