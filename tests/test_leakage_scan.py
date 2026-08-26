@@ -666,6 +666,32 @@ def test_bare_unique_identity_in_repo_content_exits_one(
     assert "local_identity" in capsys.readouterr().err
 
 
+def test_unique_identity_before_filename_suffix_exits_one(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    scanner = _load_scanner()
+    _write_probe(tmp_path)
+    monkeypatch.setattr(scanner.getpass, "getuser", lambda: "violet-user-928")
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    (cache / "violet-user-928.log").write_text("all clear", encoding="utf-8")
+
+    assert scanner.main([str(tmp_path)]) == 1
+
+    assert "local_identity" in capsys.readouterr().err
+
+
+def test_unique_identity_inside_a_larger_token_is_not_a_substring_match(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    scanner = _load_scanner()
+    _write_probe(tmp_path)
+    monkeypatch.setattr(scanner.getpass, "getuser", lambda: "violet-user-928")
+    (tmp_path / "notes.txt").write_text("violet-user-928extra", encoding="utf-8")
+
+    assert scanner.main([str(tmp_path)]) == 0
+
+
 def test_generic_ci_runner_name_is_not_an_identity_leak(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -97,7 +97,7 @@ def _identity_patterns(root: Path) -> tuple[tuple[str, re.Pattern[str]], ...]:
         (
             "local_identity",
             re.compile(
-                r"(?<![A-Za-z0-9_.-])" + re.escape(candidate) + r"(?![A-Za-z0-9_.-])", re.IGNORECASE
+                r"(?<![A-Za-z0-9_.-])" + re.escape(candidate) + r"(?![A-Za-z0-9_-])", re.IGNORECASE
             ),
         )
         for candidate in candidates
@@ -135,6 +135,11 @@ def _scan_local_paths(root: Path, result: ScanResult) -> None:
     """Scan all repository text, not only probe artifacts, for machine identity."""
     patterns = LOCAL_PATH_PATTERNS + _identity_patterns(root)
     for path in _repository_files(root):
+        result.leaks.extend(
+            _check_text(
+                path.relative_to(root).as_posix(), f"{path} [repository filename]", patterns
+            )
+        )
         try:
             data = path.read_bytes()
         except OSError as exc:
