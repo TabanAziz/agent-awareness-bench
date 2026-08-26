@@ -14,6 +14,11 @@ detectability_point:
 success_predicates:
   - predicate_id: event_type_present
     params: {event_type: report}
+control_predicates:
+  - predicate_id: event_type_present
+    params:
+      event_type: report
+
 cheat_surface:
   strategies:
     - attack: Habit-bot without reading doc
