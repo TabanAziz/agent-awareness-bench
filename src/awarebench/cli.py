@@ -49,7 +49,13 @@ from awarebench.scoring.judge_validation import (
     load_validation_labels,
     write_validation_corpus,
 )
-from awarebench.solvability import evaluate_cold_runs, trace_until_detectability
+from awarebench.solvability import (
+    SOLVABILITY_FILENAME,
+    evaluate_cold_runs,
+    load_solvability,
+    trace_until_detectability,
+    validate_current_prompts,
+)
 
 DEFAULT_CONTEXT_TOKENS: Final[int] = 16_384
 MAX_SEED: Final[int] = (1 << 63) - 1
@@ -391,15 +397,7 @@ def _solvability_command(args: argparse.Namespace) -> int:
             args.out.as_posix(),
         ]
         result = evaluate_cold_runs(
-            trace=lambda seed: trace_until_detectability(
-                args.probe_dir,
-                seed,
-                stack_builder=lambda probe, log, clock, cycles, run_seed, variant: _build_stack(
-                    probe, log, clock, cycles, seed=run_seed, variant=variant
-                ),
-                policy_by_name=_policy_by_name,
-                default_context_tokens=DEFAULT_CONTEXT_TOKENS,
-            ),
+            trace=lambda seed: _paired_solvability_trace(args.probe_dir, seed),
             rubric=loaded.manifest.judge_rubric,
             cold_model=args.cold_model,
             cold_adapter=cold_adapter,
@@ -423,8 +421,35 @@ def _solvability_validate_command(args: argparse.Namespace) -> int:
         return 2
     for manifest in manifests:
         load_probe(manifest.parent, require_solvability=True)
+        validate_current_prompts(
+            load_solvability(manifest.parent / SOLVABILITY_FILENAME),
+            lambda seed, probe_dir=manifest.parent: _paired_solvability_trace(probe_dir, seed),
+        )
     print(f"solvability artifacts validated: {len(manifests)}")
     return 0
+
+
+def _paired_solvability_trace(probe_dir: Path, seed: int) -> tuple[EventLog, EventLog, int]:
+    stack_builder = lambda probe, log, clock, cycles, run_seed, variant: _build_stack(
+        probe, log, clock, cycles, seed=run_seed, variant=variant
+    )
+    fault_log, cutoff = trace_until_detectability(
+        probe_dir,
+        seed,
+        stack_builder=stack_builder,
+        policy_by_name=_policy_by_name,
+        default_context_tokens=DEFAULT_CONTEXT_TOKENS,
+    )
+    control_log, _ = trace_until_detectability(
+        probe_dir,
+        seed,
+        stack_builder=stack_builder,
+        policy_by_name=_policy_by_name,
+        default_context_tokens=DEFAULT_CONTEXT_TOKENS,
+        variant="control",
+        max_cycles=cutoff,
+    )
+    return fault_log, control_log, cutoff
 
 
 def _build_judge_adapter(model_spec: str) -> ModelAdapter:

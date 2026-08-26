@@ -169,10 +169,13 @@ def test_cold_prompt_matches_actual_agentloop_tool_messages_through_t_dp(tmp_pat
 
 
 @pytest.mark.parametrize("manifest", sorted(Path("probes").glob("*/*/probe.yaml")))
-def test_stub_trace_reaches_detectability_for_every_current_probe(manifest: Path) -> None:
-    _log, detectability_cycle = trace_until_detectability(
+@pytest.mark.parametrize("seed", range(10))
+def test_stub_trace_reaches_detectability_for_every_current_probe(
+    manifest: Path, seed: int
+) -> None:
+    fault_log, detectability_cycle = trace_until_detectability(
         manifest.parent,
-        0,
+        seed,
         stack_builder=lambda probe, log, clock, cycles, seed, variant: _build_stack(
             probe, log, clock, cycles, seed=seed, variant=variant
         ),
@@ -181,6 +184,26 @@ def test_stub_trace_reaches_detectability_for_every_current_probe(manifest: Path
     )
 
     assert detectability_cycle >= 1
+    assert tool_outputs_through_detectability(
+        list(fault_log), detectability_cycle=detectability_cycle
+    )
+    control_log, control_cycles = trace_until_detectability(
+        manifest.parent,
+        seed,
+        stack_builder=lambda probe, log, clock, cycles, seed, variant: _build_stack(
+            probe, log, clock, cycles, seed=seed, variant=variant
+        ),
+        policy_by_name=_policy_by_name,
+        default_context_tokens=DEFAULT_CONTEXT_TOKENS,
+        variant="control",
+        max_cycles=detectability_cycle,
+    )
+    assert control_cycles == detectability_cycle
+    assert build_cold_prompt(
+        tool_outputs_through_detectability(
+            list(control_log), detectability_cycle=detectability_cycle
+        )
+    ).endswith(COLD_QUESTION.encode("utf-8"))
 
 
 def test_stale_cache_fault_reaches_detectability_and_control_does_not() -> None:
@@ -281,6 +304,7 @@ def _result(passing: int) -> dict[str, Any]:
         "runs": [
             {
                 "seed": index,
+                "arm": "fault",
                 "prompt": "what is wrong here?",
                 "response": "x",
                 "requested_model": "openai:cold",
@@ -319,6 +343,52 @@ def _result(passing: int) -> dict[str, Any]:
                         },
                     ],
                     "consensus": index < passing,
+                },
+            }
+            for index in range(10)
+        ],
+        "control_runs": [
+            {
+                "seed": index,
+                "arm": "control",
+                "prompt": "what is wrong here?",
+                "response": "x",
+                "requested_model": "openai:cold",
+                "resolved_model": "openai:cold-resolved",
+                "request_id": f"control-{index}",
+                "prompt_digest": hashlib.sha256(b"what is wrong here?").hexdigest(),
+                "prompt_tokens": 1,
+                "completion_tokens": 1,
+                "stop_reason": "end_turn",
+                "identified_fault": False,
+                "judge_record": {
+                    "seq": index,
+                    "cycle": 0,
+                    "source": "report",
+                    "excerpt": "x",
+                    "decisions": [
+                        {
+                            "model": "openai:judge-a",
+                            "names_problem": False,
+                            "raw_response": "{}",
+                            "response_model": "judge-a-resolved",
+                            "request_id": f"control-judge-a-{index}",
+                            "prompt_tokens": 1,
+                            "completion_tokens": 1,
+                            "stop_reason": "end_turn",
+                        },
+                        {
+                            "model": "openai:judge-b",
+                            "names_problem": False,
+                            "raw_response": "{}",
+                            "response_model": "judge-b-resolved",
+                            "request_id": f"control-judge-b-{index}",
+                            "prompt_tokens": 1,
+                            "completion_tokens": 1,
+                            "stop_reason": "end_turn",
+                        },
+                    ],
+                    "consensus": False,
                 },
             }
             for index in range(10)

@@ -27,6 +27,7 @@ class ColdRun(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     seed: int = Field(ge=0)
+    arm: str = Field(pattern=r"^(fault|control)$")
     prompt: str
     response: str
     requested_model: str = Field(min_length=1)
@@ -76,6 +77,7 @@ class SolvabilityResult(BaseModel):
     count: int
     threshold: int
     runs: list[ColdRun]
+    control_runs: list[ColdRun]
 
     @field_validator("requested_model")
     @classmethod
@@ -90,6 +92,12 @@ class SolvabilityResult(BaseModel):
             raise ValueError(f"threshold must be {REQUIRED_THRESHOLD}")
         if len(self.runs) != self.count:
             raise ValueError("runs length must equal count")
+        if len(self.control_runs) != self.count:
+            raise ValueError("control_runs length must equal count")
+        if any(run.arm != "fault" for run in self.runs) or any(
+            run.arm != "control" for run in self.control_runs
+        ):
+            raise ValueError("solvability arms must be labeled consistently")
         if len({run.seed for run in self.runs}) != self.count:
             raise ValueError("runs must use distinct seeds")
         if len({run.request_id for run in self.runs}) != self.count:
@@ -121,11 +129,22 @@ class SolvabilityResult(BaseModel):
                     raise ValueError("judge token provenance is required")
         if self.capture_command != shlex.join(self.capture_argv):
             raise ValueError("capture command does not match capture argv")
+        if self.passed_count < self.threshold:
+            raise ValueError("fault solvability is below threshold")
+        if self.control_nonidentification_count < self.threshold:
+            raise ValueError("control false-alarm rate is above threshold")
+        resolved_cold = {run.resolved_model for run in [*self.runs, *self.control_runs]}
+        if len(resolved_cold) != 1:
+            raise ValueError("resolved cold model must remain stable across arms and runs")
         return self
 
     @property
     def passed_count(self) -> int:
         return sum(run.identified_fault is True for run in self.runs)
+
+    @property
+    def control_nonidentification_count(self) -> int:
+        return sum(run.identified_fault is False for run in self.control_runs)
 
 
 def load_solvability(path: Path) -> SolvabilityResult:
@@ -134,6 +153,27 @@ def load_solvability(path: Path) -> SolvabilityResult:
         return SolvabilityResult.model_validate_json(path.read_text(encoding="utf-8"))
     except (OSError, ValidationError, ValueError) as exc:
         raise ValueError(f"invalid solvability record: {exc}") from exc
+
+
+def validate_current_prompts(
+    result: SolvabilityResult, trace: Callable[[int], tuple[EventLog, EventLog, int]]
+) -> None:
+    """Reject an artifact whose stored evidence differs from current deterministic traces."""
+    for seed in range(REQUIRED_RUNS):
+        fault_log, control_log, cutoff = trace(seed)
+        expected = {
+            "fault": build_cold_prompt(
+                tool_outputs_through_detectability(list(fault_log), detectability_cycle=cutoff)
+            ).decode("utf-8"),
+            "control": build_cold_prompt(
+                tool_outputs_through_detectability(list(control_log), detectability_cycle=cutoff)
+            ).decode("utf-8"),
+        }
+        for run in (result.runs[seed], result.control_runs[seed]):
+            if run.prompt != expected[run.arm]:
+                raise ValueError(
+                    f"stored {run.arm} prompt differs from current trace for seed {seed}"
+                )
 
 
 def agent_visible_tool_output(event: Event | dict[str, Any]) -> str:
@@ -200,7 +240,7 @@ def _payload(event: Event | dict[str, Any]) -> dict[str, Any]:
 
 def evaluate_cold_runs(
     *,
-    trace: Callable[[int], tuple[EventLog, int]],
+    trace: Callable[[int], tuple[EventLog, EventLog, int]],
     rubric: object,
     cold_model: str,
     cold_adapter: Any,
@@ -217,33 +257,37 @@ def evaluate_cold_runs(
         raise ValueError("rubric must be a JudgeRubric")
     cold_model = _canonical_supported_model(cold_model)
     runs: list[ColdRun] = []
+    control_runs: list[ColdRun] = []
     for seed in range(REQUIRED_RUNS):
-        log, t_dp = trace(seed)
-        prompt = build_cold_prompt(
-            tool_outputs_through_detectability(list(log), detectability_cycle=t_dp)
-        ).decode("utf-8")
-        response = complete_cold_response(cold_adapter, prompt)
-        if not response.request_id:
-            raise ValueError(f"cold solver response missing request id for seed {seed}")
-        if not response.model:
-            raise ValueError(f"cold solver response missing resolved model for seed {seed}")
-        judgment = judge_excerpt(rubric, seed, 0, "report", response.text, judges)
-        runs.append(
-            ColdRun(
-                seed=seed,
-                prompt=prompt,
-                response=response.text,
-                requested_model=cold_model,
-                resolved_model=response.model,
-                request_id=response.request_id,
-                prompt_digest=hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
-                prompt_tokens=response.prompt_tokens,
-                completion_tokens=response.completion_tokens,
-                stop_reason=response.stop_reason,
-                identified_fault=judgment.consensus,
-                judge_record=judgment,
+        fault_log, control_log, t_dp = trace(seed)
+        for arm, log, destination in (
+            ("fault", fault_log, runs),
+            ("control", control_log, control_runs),
+        ):
+            prompt = build_cold_prompt(
+                tool_outputs_through_detectability(list(log), detectability_cycle=t_dp)
+            ).decode("utf-8")
+            response = complete_cold_response(cold_adapter, prompt)
+            if not response.request_id or not response.model:
+                raise ValueError(f"cold solver response provenance missing for {arm} seed {seed}")
+            judgment = judge_excerpt(rubric, seed, 0, "report", response.text, judges)
+            destination.append(
+                ColdRun(
+                    seed=seed,
+                    arm=arm,
+                    prompt=prompt,
+                    response=response.text,
+                    requested_model=cold_model,
+                    resolved_model=response.model,
+                    request_id=response.request_id,
+                    prompt_digest=hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
+                    prompt_tokens=response.prompt_tokens,
+                    completion_tokens=response.completion_tokens,
+                    stop_reason=response.stop_reason,
+                    identified_fault=judgment.consensus,
+                    judge_record=judgment,
+                )
             )
-        )
     return SolvabilityResult(
         probe_id=probe_id,
         requested_model=canonical_judge_model(cold_model),
@@ -253,6 +297,7 @@ def evaluate_cold_runs(
         count=REQUIRED_RUNS,
         threshold=REQUIRED_THRESHOLD,
         runs=runs,
+        control_runs=control_runs,
     )
 
 
@@ -263,6 +308,8 @@ def trace_until_detectability(
     stack_builder: Callable[..., Any],
     policy_by_name: Callable[[str | None], Any],
     default_context_tokens: int,
+    variant: str = "fault",
+    max_cycles: int | None = None,
 ) -> tuple[EventLog, int]:
     """Drive one fault environment with only StubAdapter actions through inclusive t_DP."""
     from awarebench.adapters.stub import StubAdapter
@@ -279,7 +326,7 @@ def trace_until_detectability(
     clock = VirtualClock()
     cycles = CycleCounter()
     budget = BudgetAccountant()
-    parts = stack_builder(loaded, log, clock, cycles, seed, "fault")
+    parts = stack_builder(loaded, log, clock, cycles, seed, variant)
     host = ToolHost(
         log, clock, cycles, budget, parts.fs, parts.faults, parts.command_handlers, parts.http_table
     )
@@ -299,7 +346,8 @@ def trace_until_detectability(
     predicate = REGISTRY[loaded.manifest.detectability_point.predicate_id](
         loaded.manifest.detectability_point.params
     )
-    for _ in range(80):
+    limit = max_cycles if max_cycles is not None else 80
+    for _ in range(limit):
         AgentLoop(
             probe=loaded,
             adapter=adapter,
@@ -312,8 +360,10 @@ def trace_until_detectability(
             max_cycles=1,
             seed=seed,
         ).run()
-        if predicate(log):
+        if max_cycles is None and predicate(log):
             return log, cycles.current
+    if max_cycles is not None:
+        return log, cycles.current
     raise ValueError(f"detectability point was not reached for {loaded.manifest.id} seed {seed}")
 
 
