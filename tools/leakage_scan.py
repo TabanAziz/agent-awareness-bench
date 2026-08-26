@@ -19,7 +19,7 @@ from awarebench.probes.loader import ProbeGateError, load_probe
 
 SEEDS: Final[tuple[int, ...]] = (0, 1, 2)
 VARIANTS: Final[tuple[str, ...]] = ("fault", "control")
-HANDLER_OUTPUT_SAMPLES: Final[int] = 3
+HANDLER_OUTPUT_SAMPLES: Final[int] = 40
 GENERIC_IDENTITIES: Final[frozenset[str]] = frozenset(
     {
         "admin",
@@ -66,13 +66,18 @@ class ScanResult:
     files_inspected: int = 0
     probes_inspected: int = 0
     environments_inspected: int = 0
+    seed_messages_inspected: int = 0
+    http_bodies_inspected: int = 0
+    virtual_filenames_inspected: int = 0
     runtime_files_inspected: int = 0
+    virtual_state_rescans: int = 0
     command_outputs_inspected: int = 0
+    binary_files_skipped: int = 0
     leaks: list[str] = field(default_factory=list)
 
 
 def _identity_patterns(root: Path) -> tuple[tuple[str, re.Pattern[str]], ...]:
-    """Return local-path-qualified patterns for non-generic machine identities."""
+    """Return bare-word patterns for non-generic local machine identities."""
     username = getpass.getuser().casefold()
     parent = root.parent.name.casefold()
     candidates = tuple(
@@ -80,28 +85,15 @@ def _identity_patterns(root: Path) -> tuple[tuple[str, re.Pattern[str]], ...]:
         for candidate in (username, parent)
         if candidate and candidate not in GENERIC_IDENTITIES
     )
-    posix_home = re.escape("/" + "home" + "/")
-    posix_users = re.escape("/" + "Users" + "/")
-    windows_users = r"[A-Za-z]:" + re.escape("\\" + "Users" + "\\")
-    user_prefix = f"(?:{posix_home}|{posix_users}|{windows_users})"
-    parent_prefix = "(?:" + posix_home + "[^/]+/|" + posix_users + "[^/]+/|" + windows_users
-    parent_prefix += r"[^\\]+\\)"
-    patterns: list[tuple[str, re.Pattern[str]]] = []
-    if username in candidates:
-        patterns.append(
-            (
-                "local_identity",
-                re.compile(user_prefix + re.escape(username) + r"(?=[/\\]|$)", re.IGNORECASE),
-            )
+    return tuple(
+        (
+            "local_identity",
+            re.compile(
+                r"(?<![A-Za-z0-9_.-])" + re.escape(candidate) + r"(?![A-Za-z0-9_.-])", re.IGNORECASE
+            ),
         )
-    if parent in candidates:
-        patterns.append(
-            (
-                "local_identity",
-                re.compile(parent_prefix + re.escape(parent) + r"(?=[/\\]|$)", re.IGNORECASE),
-            )
-        )
-    return tuple(patterns)
+        for candidate in candidates
+    )
 
 
 def _agent_visible_patterns(root: Path) -> tuple[tuple[str, re.Pattern[str]], ...]:
@@ -135,14 +127,28 @@ def _scan_local_paths(root: Path, result: ScanResult) -> None:
     """Scan all repository text, not only probe artifacts, for machine identity."""
     patterns = LOCAL_PATH_PATTERNS + _identity_patterns(root)
     for path in _repository_files(root):
-        result.files_inspected += 1
         try:
-            text = path.read_text(encoding="utf-8")
-        except UnicodeDecodeError:
-            continue
+            text = _decode_repository_text(path)
         except OSError as exc:
             raise ScanError(f"cannot read repository file {path}: {exc}") from exc
+        if text is None:
+            result.binary_files_skipped += 1
+            continue
+        result.files_inspected += 1
         result.leaks.extend(_check_text(text, str(path), patterns))
+
+
+def _decode_repository_text(path: Path) -> str | None:
+    """Decode UTF-8 and BOM-marked UTF-16 text; return None for opaque binary data."""
+    data = path.read_bytes()
+    if data.startswith(b"\xef\xbb\xbf"):
+        return data.decode("utf-8-sig")
+    if data.startswith((b"\xff\xfe", b"\xfe\xff")):
+        return data.decode("utf-16")
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
 
 
 def _task_text(manifest_path: Path) -> str:
@@ -212,12 +218,36 @@ def _scan_environment(
     result.environments_inspected += 1
     source = f"{probe_dir} [runtime {variant} seed={seed}]"
     patterns = _agent_visible_patterns(root)
-    for virtual_path in parts.fs.list_files():
-        content = parts.fs.read(virtual_path)
-        if content is None:
-            raise ScanError(f"runtime file disappeared in {probe_dir}: {virtual_path}")
-        result.runtime_files_inspected += 1
-        result.leaks.extend(_check_text(content, f"{source} {virtual_path}", patterns))
+    surfaces_inspected = 0
+
+    for message_index, (_role, content) in enumerate(parts.seed_messages, start=1):
+        result.seed_messages_inspected += 1
+        surfaces_inspected += 1
+        result.leaks.extend(
+            _check_text(content, f"{source} seed-message={message_index}", patterns)
+        )
+
+    for url, versions in sorted(parts.http_table.items()):
+        for version_index, (body, _last_modified) in enumerate(versions, start=1):
+            result.http_bodies_inspected += 1
+            surfaces_inspected += 1
+            result.leaks.extend(
+                _check_text(body, f"{source} http={url} version={version_index}", patterns)
+            )
+
+    def scan_virtual_files(state: str) -> None:
+        nonlocal surfaces_inspected
+        for virtual_path in parts.fs.list_files():
+            content = parts.fs.read(virtual_path)
+            if content is None:
+                raise ScanError(f"runtime file disappeared in {probe_dir}: {virtual_path}")
+            result.virtual_filenames_inspected += 1
+            result.runtime_files_inspected += 1
+            surfaces_inspected += 2
+            result.leaks.extend(_check_text(virtual_path, f"{source} {state} filename", patterns))
+            result.leaks.extend(_check_text(content, f"{source} {state} {virtual_path}", patterns))
+
+    scan_virtual_files("initial")
 
     for command, handler in sorted(parts.command_handlers.items()):
         for output_index in range(HANDLER_OUTPUT_SAMPLES):
@@ -229,14 +259,22 @@ def _scan_environment(
                     f"({variant}, seed {seed}, {command}, output {output_index + 1}): {exc}"
                 ) from exc
             result.command_outputs_inspected += 1
+            surfaces_inspected += 1
             result.leaks.extend(_check_text(output, f"{source} command={command}", patterns))
+            result.virtual_state_rescans += 1
+            scan_virtual_files(f"after-command={command} output={output_index + 1}")
+
+    if surfaces_inspected == 0:
+        raise ScanError(f"{probe_dir} ({variant}, seed {seed}) exposed zero agent-visible surfaces")
 
 
 def _scan_probe(root: Path, probe_dir: Path, result: ScanResult) -> None:
     manifest_path = probe_dir / "probe.yaml"
     result.probes_inspected += 1
     result.leaks.extend(
-        _check_text(_task_text(manifest_path), f"{manifest_path} [task]", LEAK_PATTERNS)
+        _check_text(
+            _task_text(manifest_path), f"{manifest_path} [task]", _agent_visible_patterns(root)
+        )
     )
     _scan_source_literals(probe_dir, result)
     for seed in SEEDS:
@@ -263,8 +301,13 @@ def _report_counts(result: ScanResult, *, stream: TextIO) -> None:
         "inspected "
         f"{result.files_inspected} files, {result.probes_inspected} probes, "
         f"{result.environments_inspected} environments, "
-        f"{result.runtime_files_inspected} virtual files, and "
-        f"{result.command_outputs_inspected} command outputs.",
+        f"{result.seed_messages_inspected} seed messages, "
+        f"{result.http_bodies_inspected} HTTP bodies, "
+        f"{result.virtual_filenames_inspected} virtual filenames, "
+        f"{result.runtime_files_inspected} virtual file contents, "
+        f"{result.virtual_state_rescans} virtual state rescans, "
+        f"{result.command_outputs_inspected} command outputs, and "
+        f"{result.binary_files_skipped} skipped binary files.",
         file=stream,
     )
 

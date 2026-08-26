@@ -30,9 +30,15 @@ def _write_probe(
     tmp_path: Path,
     *,
     runtime_text: str = "all clear",
+    runtime_filename: str = "runtime.txt",
     command_text: str = "all clear",
     delayed_command_text: str = "all clear",
+    delayed_command_call: int = 2,
+    post_handler_text: str | None = None,
+    seed_message: str | None = None,
+    http_body: str | None = None,
     source_literal: str | None = None,
+    with_runtime_surfaces: bool = True,
 ) -> Path:
     root = tmp_path / "probes" / "futile-loop" / "scanner-probe"
     root.mkdir(parents=True)
@@ -65,19 +71,37 @@ def _write_probe(
         "def generate(seed):\n    return {'seed': seed}\n", encoding="utf-8"
     )
     runtime_expression = _encoded_expression(runtime_text)
+    runtime_filename_expression = _encoded_expression(runtime_filename)
     command_expression = _encoded_expression(command_text)
     delayed_command_expression = _encoded_expression(delayed_command_text)
-    applier = (
-        "def apply(parts, seed, log, variant):\n"
-        f"    parts.fs.write('runtime.txt', {runtime_expression})\n"
-        f"    outputs = ({command_expression}, {delayed_command_expression})\n"
-        "    state = {'calls': 0}\n"
-        "    def status(command):\n"
-        "        index = min(state['calls'], len(outputs) - 1)\n"
-        "        state['calls'] += 1\n"
-        "        return 0, outputs[index]\n"
-        "    parts.command_handlers['status'] = status\n"
-    )
+    applier = "def apply(parts, seed, log, variant):\n"
+    if with_runtime_surfaces:
+        applier += (
+            f"    parts.fs.write({runtime_filename_expression}, {runtime_expression})\n"
+            f"    outputs = ({command_expression}, {delayed_command_expression})\n"
+            "    state = {'calls': 0}\n"
+            "    def status(command):\n"
+            "        state['calls'] += 1\n"
+            f"        output = outputs[1] if state['calls'] == {delayed_command_call} else outputs[0]\n"
+        )
+        if post_handler_text is not None:
+            post_handler_expression = _encoded_expression(post_handler_text)
+            applier += (
+                f"        if state['calls'] == {delayed_command_call}:\n"
+                f"            parts.fs.write('changed.txt', {post_handler_expression})\n"
+            )
+        applier += "        return 0, output\n    parts.command_handlers['status'] = status\n"
+    if seed_message is not None:
+        applier += (
+            f"    parts.seed_messages.append(('user', {_encoded_expression(seed_message)}))\n"
+        )
+    if http_body is not None:
+        applier += (
+            "    parts.http_table['https://status.test'] = "
+            f"[({_encoded_expression(http_body)}, 1)]\n"
+        )
+    if not with_runtime_surfaces and seed_message is None and http_body is None:
+        applier += "    pass\n"
     if source_literal is not None:
         applier += f"SOURCE_ONLY = {source_literal!r}\n"
     (root / "injection.py").write_text(applier, encoding="utf-8")
@@ -145,8 +169,10 @@ def test_runtime_files_and_command_outputs_are_scanned_for_every_seed(tmp_path: 
     assert result.files_inspected > 0
     assert result.probes_inspected == 1
     assert result.environments_inspected == 6
-    assert result.runtime_files_inspected == 6
-    assert result.command_outputs_inspected == 18
+    assert result.virtual_filenames_inspected == 246
+    assert result.runtime_files_inspected == 246
+    assert result.virtual_state_rescans == 240
+    assert result.command_outputs_inspected == 240
     assert result.leaks == []
 
 
@@ -174,6 +200,21 @@ def test_second_command_output_is_scanned(
     assert "command=status" in capsys.readouterr().err
 
 
+def test_fortieth_command_output_is_scanned(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    scanner = _load_scanner()
+    probes_root = _write_probe(
+        tmp_path,
+        delayed_command_call=40,
+        delayed_command_text="this is a benchmark secret",
+    ).parents[1]
+
+    assert scanner.main([str(probes_root)]) == 1
+
+    assert "command=status" in capsys.readouterr().err
+
+
 def test_python_source_literals_remain_scanned(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -191,12 +232,50 @@ def test_runtime_surfaces_reject_local_paths(
 ) -> None:
     scanner = _load_scanner()
     local_path = "/" + "home" + "/agent/cache"
-    kwargs = {f"{surface}_text": local_path}
-    probes_root = _write_probe(tmp_path, **kwargs).parents[1]
+    probe = (
+        _write_probe(tmp_path, runtime_text=local_path)
+        if surface == "runtime"
+        else _write_probe(tmp_path, command_text=local_path)
+    )
+    probes_root = probe.parents[1]
 
     assert scanner.main([str(probes_root)]) == 1
 
     assert "local_path" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "surface",
+    ["seed_message", "http_body", "runtime_filename", "post_handler_text"],
+)
+def test_omitted_agent_visible_surfaces_are_scanned(
+    tmp_path: Path, surface: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    scanner = _load_scanner()
+    if surface == "seed_message":
+        probe = _write_probe(tmp_path, seed_message="benchmark")
+    elif surface == "http_body":
+        probe = _write_probe(tmp_path, http_body="benchmark")
+    elif surface == "runtime_filename":
+        probe = _write_probe(tmp_path, runtime_filename="benchmark")
+    else:
+        probe = _write_probe(tmp_path, post_handler_text="benchmark")
+    probes_root = probe.parents[1]
+
+    assert scanner.main([str(probes_root)]) == 1
+
+    assert "benchmark" in capsys.readouterr().err
+
+
+def test_environment_with_no_agent_visible_surface_fails_closed(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    scanner = _load_scanner()
+    probes_root = _write_probe(tmp_path, with_runtime_surfaces=False).parents[1]
+
+    assert scanner.main([str(probes_root)]) == 2
+
+    assert "zero agent-visible surfaces" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize(
@@ -227,6 +306,26 @@ def test_path_qualified_unique_identity_in_repo_content_exits_one(
     assert "local_identity" in capsys.readouterr().err
 
 
+@pytest.mark.parametrize("identity_kind", ["username", "parent"])
+def test_bare_unique_identity_in_repo_content_exits_one(
+    tmp_path: Path,
+    identity_kind: str,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scanner = _load_scanner()
+    root = tmp_path / "violet-parent-928" / "repo"
+    root.mkdir(parents=True)
+    _write_probe(root)
+    monkeypatch.setattr(scanner.getpass, "getuser", lambda: "violet-user-928")
+    identity = "violet-user-928" if identity_kind == "username" else "violet-parent-928"
+    (root / "notes.txt").write_text(identity, encoding="utf-8")
+
+    assert scanner.main([str(root)]) == 1
+
+    assert "local_identity" in capsys.readouterr().err
+
+
 def test_generic_ci_runner_name_is_not_an_identity_leak(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -236,6 +335,44 @@ def test_generic_ci_runner_name_is_not_an_identity_leak(
     (tmp_path / "notes.txt").write_text("runner completed the check", encoding="utf-8")
 
     assert scanner.main([str(tmp_path)]) == 0
+
+
+@pytest.mark.parametrize("generic_name", ["root", "runner"])
+def test_generic_root_names_are_not_identity_leaks(
+    tmp_path: Path, generic_name: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    scanner = _load_scanner()
+    root = tmp_path / generic_name / "repo"
+    root.mkdir(parents=True)
+    _write_probe(root)
+    monkeypatch.setattr(scanner.getpass, "getuser", lambda: generic_name)
+    (root / "notes.txt").write_text(generic_name, encoding="utf-8")
+
+    assert scanner.main([str(root)]) == 0
+
+
+@pytest.mark.parametrize("encoding", ["utf-8-sig", "utf-16"])
+def test_bom_encoded_local_path_is_scanned(
+    tmp_path: Path, encoding: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    scanner = _load_scanner()
+    _write_probe(tmp_path)
+    (tmp_path / "bom-notes.txt").write_bytes(("/" + "home" + "/agent").encode(encoding))
+
+    assert scanner.main([str(tmp_path)]) == 1
+
+    assert "local_path" in capsys.readouterr().err
+
+
+def test_undecoded_binary_is_reported_but_not_counted_as_inspected(tmp_path: Path) -> None:
+    scanner = _load_scanner()
+    probes_root = _write_probe(tmp_path).parents[1]
+    (probes_root / "opaque.bin").write_bytes(b"\x80\x81\x82")
+
+    result = scanner.scan_root(probes_root)
+
+    assert result.binary_files_skipped == 1
+    assert result.files_inspected == 5
 
 
 def test_ci_scans_from_repository_root() -> None:
