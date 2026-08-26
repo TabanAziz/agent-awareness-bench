@@ -45,6 +45,7 @@ def _write_probe(
     with_runtime_surfaces: bool = True,
     cross_handler_leak: bool = False,
     cutover_mutator_calls: int | None = None,
+    cutover_reader_call: int | None = None,
     cutover_suffix_leak: bool = False,
     same_handler_cutover_leak: bool = False,
     own_fortieth_handler_leak: bool = False,
@@ -122,13 +123,19 @@ def _write_probe(
     elif with_runtime_surfaces and cutover_mutator_calls is not None:
         applier += (
             f"    parts.fs.write({runtime_filename_expression}, {runtime_expression})\n"
-            "    state = {'mutations': 0}\n"
+            "    state = {'mutations': 0, 'reader_calls': 0}\n"
             "    def a_mutate(command):\n"
             "        state['mutations'] += 1\n"
             "        return 0, 'all clear'\n"
             "    def b_read(command):\n"
+            "        state['reader_calls'] += 1\n"
             f"        if state['mutations'] == {cutover_mutator_calls}"
             + (" and command.endswith('--details')" if cutover_suffix_leak else "")
+            + (
+                f" and state['reader_calls'] == {cutover_reader_call}"
+                if cutover_reader_call is not None
+                else ""
+            )
             + ":\n"
             f"            return 0, {_encoded_expression('benchmark')}\n"
             "        return 0, 'all clear'\n"
@@ -299,6 +306,28 @@ def test_runtime_files_and_command_outputs_are_scanned_for_every_seed(tmp_path: 
     assert result.leaks == []
 
 
+def test_each_environment_validates_its_manifest_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    scanner = _load_scanner()
+    probes_root = _write_probe(tmp_path).parents[1]
+    original_load_probe = scanner.load_probe
+    calls = 0
+
+    def count_load_probe(path: Path) -> Any:
+        nonlocal calls
+        calls += 1
+        return original_load_probe(path)
+
+    monkeypatch.setattr(scanner, "load_probe", count_load_probe)
+
+    assert scanner.main([str(probes_root)]) == 0
+
+    # One source-literal gate plus one manifest validation for each of the
+    # three seeds and two variants. Every one of the twelve stacks is fresh.
+    assert calls == 7
+
+
 def test_planted_command_output_leak_exits_one(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -417,6 +446,21 @@ def test_cutover_enumerates_reader_suffix_samples_after_twenty_one_mutations(
     assert scanner.main([str(probes_root)]) == 1
 
     assert "command=b_read --details" in capsys.readouterr().err
+
+
+def test_cutover_keeps_reading_after_twenty_one_mutations(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    scanner = _load_scanner()
+    probes_root = _write_probe(
+        tmp_path,
+        cutover_mutator_calls=21,
+        cutover_reader_call=10,
+    ).parents[1]
+
+    assert scanner.main([str(probes_root)]) == 1
+
+    assert "command=b_read" in capsys.readouterr().err
 
 
 def test_cutover_enumerates_distinct_samples_for_the_same_handler(

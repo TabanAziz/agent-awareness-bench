@@ -19,7 +19,7 @@ from awarebench.harness.clock import CycleCounter, VirtualClock
 from awarebench.harness.loop import DEFAULT_CYCLE_STEP_US
 from awarebench.harness.stack import StackParts
 from awarebench.harness.tools import ToolHost
-from awarebench.probes.loader import ProbeGateError, load_probe
+from awarebench.probes.loader import LoadedProbe, ProbeGateError, load_probe
 
 SEEDS: Final[tuple[int, ...]] = (0, 1, 2)
 VARIANTS: Final[tuple[str, ...]] = ("fault", "control")
@@ -270,7 +270,9 @@ def _scan_environment(
 ) -> None:
     """Scan one seed/variant through shared and per-handler fresh schedules."""
     result.environments_inspected += 1
-    parts, log, clock, cycles = _instantiate_stack(probe_dir, seed, variant, result)
+    loaded = _load_environment_probe(probe_dir, seed, variant)
+    parts, log, clock, cycles = _instantiate_stack(loaded, probe_dir, seed, variant, result)
+    patterns = _agent_visible_patterns(root)
     samples_by_handler = _command_samples(parts, probe_dir, variant, seed)
     result.command_samples_declared += sum(len(samples) for samples in samples_by_handler.values())
     handlers = sorted(samples_by_handler)
@@ -292,12 +294,13 @@ def _scan_environment(
             "http",
             (),
             sample_http=True,
+            patterns=patterns,
             result=result,
         )
 
     if round_robin_samples:
         if parts.http_table:
-            parts, log, clock, cycles = _instantiate_stack(probe_dir, seed, variant, result)
+            parts, log, clock, cycles = _instantiate_stack(loaded, probe_dir, seed, variant, result)
             _require_sample_corpus_matches(samples_by_handler, parts, probe_dir, variant, seed)
         _scan_schedule(
             root,
@@ -314,6 +317,7 @@ def _scan_environment(
                 for index in range(HANDLER_OUTPUT_SAMPLES)
             ),
             sample_http=False,
+            patterns=patterns,
             result=result,
         )
     elif not parts.http_table:
@@ -329,13 +333,14 @@ def _scan_environment(
             "surfaces-only",
             (),
             sample_http=False,
+            patterns=patterns,
             result=result,
         )
 
     for command in handlers:
         for sample in samples_by_handler[command]:
             fresh_parts, fresh_log, fresh_clock, fresh_cycles = _instantiate_stack(
-                probe_dir, seed, variant, result
+                loaded, probe_dir, seed, variant, result
             )
             _require_handlers(fresh_parts, (command,), probe_dir, variant, seed)
             _require_sample_corpus_matches(
@@ -353,6 +358,7 @@ def _scan_environment(
                 f"handler={command} sample={sample}",
                 (sample,) * HANDLER_OUTPUT_SAMPLES,
                 sample_http=False,
+                patterns=patterns,
                 result=result,
             )
 
@@ -367,7 +373,7 @@ def _scan_environment(
                         continue
                     for cutover in range(1, HANDLER_OUTPUT_SAMPLES):
                         fresh_parts, fresh_log, fresh_clock, fresh_cycles = _instantiate_stack(
-                            probe_dir, seed, variant, result
+                            loaded, probe_dir, seed, variant, result
                         )
                         _require_handlers(fresh_parts, (mutator, reader), probe_dir, variant, seed)
                         _require_sample_corpus_matches(
@@ -386,8 +392,10 @@ def _scan_environment(
                                 f"cutover={mutator}({mutator_sample})-to-"
                                 f"{reader}({reader_sample}) k={cutover}"
                             ),
-                            (mutator_sample,) * cutover + (reader_sample,),
+                            (mutator_sample,) * cutover
+                            + (reader_sample,) * (HANDLER_OUTPUT_SAMPLES - cutover),
                             sample_http=False,
+                            patterns=patterns,
                             result=result,
                         )
 
@@ -457,12 +465,23 @@ def _require_sample_corpus_matches(
         )
 
 
+def _load_environment_probe(probe_dir: Path, seed: int, variant: str) -> LoadedProbe:
+    """Validate one manifest once before building its fresh schedule stacks."""
+    try:
+        return load_probe(probe_dir)
+    except (ImportError, OSError, ProbeGateError, RuntimeError, ValueError) as exc:
+        raise ScanError(f"cannot instantiate {probe_dir} ({variant}, seed {seed}): {exc}") from exc
+
+
 def _instantiate_stack(
-    probe_dir: Path, seed: int, variant: str, result: ScanResult
+    loaded: LoadedProbe,
+    probe_dir: Path,
+    seed: int,
+    variant: str,
+    result: ScanResult,
 ) -> tuple[StackParts, EventLog, VirtualClock, CycleCounter]:
     """Build one fresh runtime stack and record the actual instantiation."""
     try:
-        loaded = load_probe(probe_dir)
         log = EventLog()
         clock = VirtualClock()
         cycles = CycleCounter()
@@ -487,12 +506,12 @@ def _scan_schedule(
     commands: tuple[str, ...],
     *,
     sample_http: bool,
+    patterns: tuple[tuple[str, re.Pattern[str]], ...],
     result: ScanResult,
 ) -> None:
     """Scan one fresh stack through exact ToolHost-visible values."""
     result.schedules_inspected += 1
     source = f"{probe_dir} [runtime {variant} seed={seed} schedule={schedule}]"
-    patterns = _agent_visible_patterns(root)
     surfaces_inspected = 0
     host = ToolHost(
         event_log=log,
