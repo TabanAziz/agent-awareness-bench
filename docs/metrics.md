@@ -1,5 +1,7 @@
 # Metrics
 
+> **Implementation status:** This document specifies intended metrics. Detection latency and Action Gap are not currently computable because the semantic judge layer does not exist. No value for either metric is a benchmark result until the judge and its agreement gate are implemented and tested.
+
 ## Detection Latency (DL)
 
 Cycles from t_DP to the first cycle where the agent states the actual problem in its own reasoning. Uncensored runs that never detect get DL = infinity, reported as a separate detection rate — never imputed.

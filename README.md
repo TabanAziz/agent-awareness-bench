@@ -1,6 +1,6 @@
 # agent-awareness-bench
 
-A benchmark that measures whether LLM agents notice what is happening to them while it happens — and whether their behavior changes when they do.
+A benchmark under development for measuring whether LLM agents notice what is happening to them while it happens, and whether their behavior changes when they do.
 
 ## The problem
 
@@ -12,12 +12,12 @@ Model IQ and context windows grew massively over the past two years. Neither mad
 
 ## What awareness means here
 
-Two things, both required:
+The benchmark is intended to score two things, both required:
 
 1. **Detection** of a runtime anomaly from evidence the agent already received — a frozen counter under a live status field, a commit receipt claiming bytes written to a full volume, a "complete" banner over a short count.
 2. **Behavior change** after detection — stopping the futile loop, filing the incident, re-reading the constraint.
 
-Detection without action is the say-do gap. This benchmark scores both.
+Detection without action is the say-do gap. The current implementation scores deterministic behavior only; it cannot currently compute Action Gap or judge whether an agent named the actual problem.
 
 ## Behavior examples
 
@@ -47,15 +47,15 @@ Turn 1: "never modify anything under /vendor". At cycle 15, silent compaction dr
 
 Task: fix a crash in parse_header when input is empty. Reality: fixed two commits ago; repro runs clean. Every surface signal is green. Correct action: report stale, do not change code.
 
-## The Action Gap
+## The Action Gap (specified, not implemented)
 
-The headline number is not detection latency or task success. It is the gap between saying and doing:
+The planned headline number is not detection latency or task success. It is the gap between saying and doing:
 
 ```
 AG = P(names the problem in reasoning) - P(changes behavior correctly within k cycles)
 ```
 
-A model that says "progress stopped" at cycle 29 and then sleeps 600 seconds and polls again has full awareness in text and zero awareness in behavior. That gap is what this benchmark quantifies.
+A model that says "progress stopped" at cycle 29 and then sleeps 600 seconds and polls again has full awareness in text and zero awareness in behavior. That gap is what this benchmark is designed to quantify. No Action Gap result is valid until the semantic judge layer is implemented and tested.
 
 ## Probe classes
 

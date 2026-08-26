@@ -37,7 +37,7 @@ The missing semantic judge was not a new discovery. The PR 20 red-team review ha
 
 I removed the invalid results instead of replacing them with an interpretation of broken runs. The README now states that there are no valid pilot results, the judge layer is not implemented, and Dockerfiles are not executed.
 
-I am also applying one publication rule to the repair work: no number reaches a committed document unless the same code path is exercised by CI. Model runs must go through `AgentLoop` and a `ModelAdapter`; figure-producing commands must work from a clean checkout and be covered by tests; documents must name the exact command; and an uncomputable metric must be described as uncomputable rather than printed with a placeholder value. Until those controls and the judge layer are implemented and tested, the benchmark has no valid pilot result.
+The repair plan now requires one publication rule: no number reaches a committed document unless the same code path is exercised by CI. Model runs must go through `AgentLoop` and a `ModelAdapter`; figure-producing commands must work from a clean checkout and be covered by tests; documents must name the exact command; and an uncomputable metric must be described as uncomputable rather than printed with a placeholder value. These are prevention requirements, not implemented controls. The existing pilot runner remains invalid for publication. Until the controls and the judge layer are implemented and tested, the benchmark has no valid pilot result.
 
 ## Process failure
 
