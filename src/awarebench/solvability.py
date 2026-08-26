@@ -98,22 +98,26 @@ class SolvabilityResult(BaseModel):
             run.arm != "control" for run in self.control_runs
         ):
             raise ValueError("solvability arms must be labeled consistently")
-        if len({run.seed for run in self.runs}) != self.count:
-            raise ValueError("runs must use distinct seeds")
-        if len({run.request_id for run in self.runs}) != self.count:
-            raise ValueError("runs must have unique request ids")
-        if any(run.requested_model != self.requested_model for run in self.runs):
+        expected_seeds = set(range(REQUIRED_RUNS))
+        if {run.seed for run in self.runs} != expected_seeds:
+            raise ValueError("fault runs must contain exactly seeds 0 through 9")
+        if {run.seed for run in self.control_runs} != expected_seeds:
+            raise ValueError("control runs must contain exactly seeds 0 through 9")
+        all_runs = [*self.runs, *self.control_runs]
+        if len({run.request_id for run in all_runs}) != len(all_runs):
+            raise ValueError("request ids must be unique across both arms")
+        if any(run.requested_model != self.requested_model for run in all_runs):
             raise ValueError("run requested models must match artifact requested_model")
         if any(
             run.prompt_digest != hashlib.sha256(run.prompt.encode("utf-8")).hexdigest()
-            for run in self.runs
+            for run in all_runs
         ):
             raise ValueError("run prompt digest does not match exact prompt")
-        first_judges = [item.model for item in self.runs[0].judge_record.decisions]
-        first_resolved = [item.response_model for item in self.runs[0].judge_record.decisions]
+        first_judges = [item.model for item in all_runs[0].judge_record.decisions]
+        first_resolved = [item.response_model for item in all_runs[0].judge_record.decisions]
         if any(not item for item in first_resolved):
             raise ValueError("judge response provenance is required")
-        for run in self.runs:
+        for run in all_runs:
             if [item.model for item in run.judge_record.decisions] != first_judges:
                 raise ValueError("judge models must remain stable across runs")
             if [item.response_model for item in run.judge_record.decisions] != first_resolved:
@@ -159,6 +163,8 @@ def validate_current_prompts(
     result: SolvabilityResult, trace: Callable[[int], tuple[EventLog, EventLog, int]]
 ) -> None:
     """Reject an artifact whose stored evidence differs from current deterministic traces."""
+    fault_by_seed = {run.seed: run for run in result.runs}
+    control_by_seed = {run.seed: run for run in result.control_runs}
     for seed in range(REQUIRED_RUNS):
         fault_log, control_log, cutoff = trace(seed)
         expected = {
@@ -169,7 +175,7 @@ def validate_current_prompts(
                 tool_outputs_through_detectability(list(control_log), detectability_cycle=cutoff)
             ).decode("utf-8"),
         }
-        for run in (result.runs[seed], result.control_runs[seed]):
+        for run in (fault_by_seed[seed], control_by_seed[seed]):
             if run.prompt != expected[run.arm]:
                 raise ValueError(
                     f"stored {run.arm} prompt differs from current trace for seed {seed}"
