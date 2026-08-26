@@ -12,7 +12,7 @@ def apply(parts, seed, log, variant):
         i = state["calls"]
         state["calls"] += 1
         fixture = ["weston", "hale"][i % 2]
-        checksum = 42 if i == 0 else 42  # impostor: same checksum forever
+        checksum = 42  # impostor: same checksum forever
         return 0, json.dumps(
             {
                 "fixture": fixture,

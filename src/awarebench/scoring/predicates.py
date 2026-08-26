@@ -1492,9 +1492,13 @@ def report_after_field_event(params: PredicateParams) -> LogPredicate:
 
 
 def http_stamp_divergence(params: PredicateParams) -> LogPredicate:
-    """True when body stamp trails transport freshness by >min_gap_us."""
+    """True when body stamp trails transport freshness by >min_gap_us.
+
+    url_suffix is validated but not used for filtering in this
+    implementation; all results from the named tool are checked.
+    """
     tool = _require_non_empty_str(params.get("tool"), "tool")
-    url_suffix = _require_non_empty_str(params.get("url_suffix"), "url_suffix")
+    _require_non_empty_str(params.get("url_suffix"), "url_suffix")
     body_field = _require_non_empty_str(params.get("body_field"), "body_field")
     min_gap_raw = params.get("min_gap_us")
     if isinstance(min_gap_raw, bool) or not isinstance(min_gap_raw, int):
