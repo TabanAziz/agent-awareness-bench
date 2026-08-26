@@ -423,7 +423,7 @@ def _solvability_validate_command(args: argparse.Namespace) -> int:
         load_probe(manifest.parent, require_solvability=True)
         probe_dir = manifest.parent
 
-        def trace(seed: int) -> tuple[EventLog, EventLog, int]:
+        def trace(seed: int, probe_dir: Path = probe_dir) -> tuple[EventLog, EventLog, int]:
             return _paired_solvability_trace(probe_dir, seed)
 
         validate_current_prompts(
