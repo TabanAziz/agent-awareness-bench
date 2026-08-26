@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 import yaml
 
+from awarebench import cli
 from awarebench.adapters import StubAdapter
 from awarebench.cli import DEFAULT_CONTEXT_TOKENS, _build_stack, _policy_by_name
 from awarebench.events import EventLog, EventType
@@ -93,6 +94,21 @@ def test_transcript_reconstructor_uses_tool_call_metadata_from_real_events() -> 
 
     assert tool_outputs_through_detectability(list(log), detectability_cycle=1) == (
         "(0, 'evidence')",
+    )
+
+
+def test_search_with_two_hits_is_not_misread_as_a_two_item_tool_tuple() -> None:
+    events = [
+        {"cycle": 1, "type": "tool_call", "payload": {"call_id": "s", "tool": "search_code"}},
+        {
+            "cycle": 1,
+            "type": "tool_result",
+            "payload": {"call_id": "s", "output": [["a.py", 1], ["b.py", 2]]},
+        },
+    ]
+
+    assert tool_outputs_through_detectability(events, detectability_cycle=1) == (
+        "[('a.py', 1), ('b.py', 2)]",
     )
 
 
@@ -237,16 +253,17 @@ def _write_probe(tmp_path: Path, result: dict[str, Any] | None) -> Path:
     return root
 
 
-def test_loader_rejects_missing_solvability_artifact(tmp_path: Path) -> None:
-    with pytest.raises(ProbeGateError, match="missing solvability"):
-        load_probe(_write_probe(tmp_path, None), require_solvability=True)
-
-
-def test_loader_rejects_solvability_below_eight_of_ten(tmp_path: Path) -> None:
-    result = {
+def _result(passing: int) -> dict[str, Any]:
+    decisions = (
+        {"model": "openai:judge-a", "names_problem": True},
+        {"model": "openai:judge-b", "names_problem": True},
+    )
+    return {
         "schema_version": 1,
-        "model": "stub",
-        "date": "2026-08-26",
+        "probe_id": "solvability-probe",
+        "requested_model": "openai:cold",
+        "captured_at": "2026-08-26",
+        "capture_command": "awarebench solvability",
         "count": 10,
         "threshold": 8,
         "runs": [
@@ -254,33 +271,54 @@ def test_loader_rejects_solvability_below_eight_of_ten(tmp_path: Path) -> None:
                 "seed": index,
                 "prompt": "what is wrong here?",
                 "response": "x",
-                "identified_fault": index < 7,
+                "requested_model": "openai:cold",
+                "resolved_model": "cold-resolved",
+                "request_id": f"request-{index}",
+                "prompt_digest": "a" * 64,
+                "prompt_tokens": 1,
+                "completion_tokens": 1,
+                "stop_reason": "end_turn",
+                "identified_fault": index < passing,
+                "judge_models": ["openai:judge-a", "openai:judge-b"],
+                "judge_decisions": list(
+                    decisions
+                    if index < passing
+                    else (
+                        {"model": "openai:judge-a", "names_problem": False},
+                        {"model": "openai:judge-b", "names_problem": False},
+                    )
+                ),
             }
             for index in range(10)
         ],
     }
+
+
+def test_loader_rejects_missing_solvability_artifact(tmp_path: Path) -> None:
+    with pytest.raises(ProbeGateError, match="missing solvability"):
+        load_probe(_write_probe(tmp_path, None), require_solvability=True)
+
+
+def test_release_validation_defaults_to_strict_artifact_gate(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    probes = tmp_path / "probes" / "futile-loop"
+    probes.mkdir(parents=True)
+    _write_probe(probes, None)
+
+    assert cli.main(["solvability-validate", str(tmp_path / "probes")]) == 2
+    assert "missing solvability" in capsys.readouterr().err
+
+
+def test_loader_rejects_solvability_below_eight_of_ten(tmp_path: Path) -> None:
+    result = _result(7)
 
     with pytest.raises(ProbeGateError, match="below threshold"):
         load_probe(_write_probe(tmp_path, result), require_solvability=True)
 
 
 def test_solvability_loader_accepts_exactly_eight_of_ten(tmp_path: Path) -> None:
-    result = {
-        "schema_version": 1,
-        "model": "stub",
-        "date": "2026-08-26",
-        "count": 10,
-        "threshold": 8,
-        "runs": [
-            {
-                "seed": index,
-                "prompt": "what is wrong here?",
-                "response": "x",
-                "identified_fault": index < 8,
-            }
-            for index in range(10)
-        ],
-    }
+    result = _result(8)
     path = _write_probe(tmp_path, result) / SOLVABILITY_FILENAME
 
     loaded = load_solvability(path)

@@ -138,6 +138,10 @@ def main(argv: list[str] | None = None) -> int:
     solvability_parser.add_argument("--judge-model", action="append", required=True)
     solvability_parser.add_argument("--date", type=date.fromisoformat, required=True)
     solvability_parser.add_argument("--out", type=Path, required=True)
+    solvability_validate_parser = subparsers.add_parser(
+        "solvability-validate", help="Validate published solvability artifacts."
+    )
+    solvability_validate_parser.add_argument("probes_dir", type=Path, default=Path("probes"))
 
     args = parser.parse_args(argv)
 
@@ -148,6 +152,8 @@ def main(argv: list[str] | None = None) -> int:
             return _judge_validation_capture_command(args)
         if args.command == "solvability":
             return _solvability_command(args)
+        if args.command == "solvability-validate":
+            return _solvability_validate_command(args)
         return _run_command(args)
     except ProbeGateError as exc:
         print(f"probe rejected: {exc}", file=sys.stderr)
@@ -384,12 +390,25 @@ def _solvability_command(args: argparse.Namespace) -> int:
             cold_adapter=cold_adapter,
             judges=judges,  # type: ignore[arg-type]
             today=args.date,
+            probe_id=loaded.manifest.id,
+            capture_command="awarebench solvability",
         )
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
         return 2
     args.out.write_text(result.model_dump_json(indent=2) + "\n", encoding="utf-8")
     print(f"solvability={result.passed_count}/{result.count}")
+    return 0
+
+
+def _solvability_validate_command(args: argparse.Namespace) -> int:
+    manifests = sorted(args.probes_dir.glob("*/*/probe.yaml"))
+    if not manifests:
+        print(f"no probe manifests found under: {args.probes_dir}", file=sys.stderr)
+        return 2
+    for manifest in manifests:
+        load_probe(manifest.parent, require_solvability=True)
+    print(f"solvability artifacts validated: {len(manifests)}")
     return 0
 
 

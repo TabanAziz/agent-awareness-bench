@@ -136,7 +136,7 @@ def load_probe(
             raise ProbeGateError(msg) from exc
 
     if require_solvability:
-        _ensure_solvability_passes(root)
+        _ensure_solvability_passes(root, manifest.id)
 
     resolved: dict[str, Path] = {}
     for field_name in PATH_FIELDS:
@@ -157,7 +157,7 @@ def load_probe(
     )
 
 
-def _ensure_solvability_passes(root: Path) -> None:
+def _ensure_solvability_passes(root: Path, probe_id: str) -> None:
     """Reject probes lacking ten cold runs or the documented eight-run threshold."""
     path = root / SOLVABILITY_FILENAME
     if not path.is_file():
@@ -166,6 +166,10 @@ def _ensure_solvability_passes(root: Path) -> None:
         result = load_solvability(path)
     except ValueError as exc:
         raise ProbeGateError(str(exc)) from exc
+    if result.probe_id != probe_id:
+        raise ProbeGateError(
+            f"solvability probe id mismatch: expected {probe_id!r}, got {result.probe_id!r}"
+        )
     if result.passed_count < result.threshold:
         raise ProbeGateError(
             f"solvability below threshold: {result.passed_count}/{result.count} < {result.threshold}"

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Callable, Sequence
 from datetime import date
@@ -26,21 +27,26 @@ class ColdRun(BaseModel):
     seed: int = Field(ge=0)
     prompt: str
     response: str
-    identified_fault: bool
-    judge_models: tuple[str, str] | None = None
-    judge_decisions: tuple[dict[str, object], dict[str, object]] | None = None
+    requested_model: str = Field(min_length=1)
+    resolved_model: str = Field(min_length=1)
+    request_id: str = Field(min_length=1)
+    prompt_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    prompt_tokens: int = Field(ge=0)
+    completion_tokens: int = Field(ge=0)
+    stop_reason: str = Field(min_length=1)
+    identified_fault: bool | None
+    judge_models: tuple[str, str]
+    judge_decisions: tuple[dict[str, object], dict[str, object]]
 
     @model_validator(mode="after")
     def _audit_judgments_when_present(self) -> ColdRun:
-        if (self.judge_models is None) != (self.judge_decisions is None):
-            raise ValueError("judge models and decisions must be recorded together")
-        if self.judge_models is None or self.judge_decisions is None:
-            return self
         if len(set(self.judge_models)) != 2:
             raise ValueError("judge models must be distinct")
         verdicts = [item.get("names_problem") for item in self.judge_decisions]
-        if verdicts != [self.identified_fault, self.identified_fault]:
+        if self.identified_fault is not None and verdicts != [self.identified_fault] * 2:
             raise ValueError("judge decisions must agree with identified_fault")
+        if self.identified_fault is None and verdicts[0] == verdicts[1]:
+            raise ValueError("nullable consensus requires judge disagreement")
         return self
 
 
@@ -50,8 +56,10 @@ class SolvabilityResult(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     schema_version: int = 1
-    model: str = Field(min_length=1)
-    date: date
+    probe_id: str = Field(min_length=1)
+    requested_model: str = Field(min_length=1)
+    captured_at: date
+    capture_command: str = Field(min_length=1)
     count: int
     threshold: int
     runs: list[ColdRun]
@@ -66,11 +74,19 @@ class SolvabilityResult(BaseModel):
             raise ValueError("runs length must equal count")
         if len({run.seed for run in self.runs}) != self.count:
             raise ValueError("runs must use distinct seeds")
+        if self.requested_model == "stub" or any(
+            run.requested_model == "stub" for run in self.runs
+        ):
+            raise ValueError("stub cold solver provenance is not publishable")
+        if len({run.request_id for run in self.runs}) != self.count:
+            raise ValueError("runs must have unique request ids")
+        if any(run.requested_model != self.requested_model for run in self.runs):
+            raise ValueError("run requested models must match artifact requested_model")
         return self
 
     @property
     def passed_count(self) -> int:
-        return sum(run.identified_fault for run in self.runs)
+        return sum(run.identified_fault is True for run in self.runs)
 
 
 def load_solvability(path: Path) -> SolvabilityResult:
@@ -86,14 +102,14 @@ def agent_visible_tool_output(event: Event | dict[str, Any]) -> str:
     payload = _payload(event)
     output = payload["output"]
     tool = payload.get("tool")
-    if tool == "run_command" or (isinstance(output, list) and len(output) == 2):
-        if not isinstance(output, list) or len(output) != 2:
-            raise ValueError("tool result output must be a two-item list")
-        return repr((output[0], output[1]))
     if tool == "search_code":
         if not isinstance(output, list):
             raise ValueError("search output must be a list")
         return repr([tuple(item) if isinstance(item, list) else item for item in output])
+    if tool == "run_command" or (isinstance(output, list) and len(output) == 2):
+        if not isinstance(output, list) or len(output) != 2:
+            raise ValueError("tool result output must be a two-item list")
+        return repr((output[0], output[1]))
     return repr(output)
 
 
@@ -151,6 +167,8 @@ def evaluate_cold_runs(
     cold_adapter: Any,
     judges: tuple[Any, Any],
     today: date,
+    probe_id: str,
+    capture_command: str,
 ) -> SolvabilityResult:
     """Run ten cold responses, retaining their F2 two-judge provenance."""
     from awarebench.probes.schema import JudgeRubric
@@ -165,14 +183,23 @@ def evaluate_cold_runs(
             tool_outputs_through_detectability(list(log), detectability_cycle=t_dp)
         ).decode("utf-8")
         response = complete_cold_response(cold_adapter, prompt)
-        judgment = judge_excerpt(rubric, seed, 0, "report", response, judges)
-        if judgment.consensus is None:
-            raise ValueError(f"judge disagreement for cold seed {seed}")
+        if not response.request_id:
+            raise ValueError(f"cold solver response missing request id for seed {seed}")
+        if not response.model:
+            raise ValueError(f"cold solver response missing resolved model for seed {seed}")
+        judgment = judge_excerpt(rubric, seed, 0, "report", response.text, judges)
         runs.append(
             ColdRun(
                 seed=seed,
                 prompt=prompt,
-                response=response,
+                response=response.text,
+                requested_model=cold_model,
+                resolved_model=response.model,
+                request_id=response.request_id,
+                prompt_digest=hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
+                prompt_tokens=response.prompt_tokens,
+                completion_tokens=response.completion_tokens,
+                stop_reason=response.stop_reason,
                 identified_fault=judgment.consensus,
                 judge_models=(judgment.decisions[0].model, judgment.decisions[1].model),
                 judge_decisions=(
@@ -182,8 +209,10 @@ def evaluate_cold_runs(
             )
         )
     return SolvabilityResult(
-        model=cold_model,
-        date=today,
+        probe_id=probe_id,
+        requested_model=cold_model,
+        captured_at=today,
+        capture_command=capture_command,
         count=REQUIRED_RUNS,
         threshold=REQUIRED_THRESHOLD,
         runs=runs,
