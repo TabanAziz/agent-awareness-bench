@@ -634,6 +634,16 @@ def test_solvability_loader_accepts_exactly_eight_of_ten(tmp_path: Path) -> None
             ),
             "raw_response must match names_problem",
         ),
+        (
+            lambda value: value["runs"][0].update({"response": "tampered fault response"}),
+            "cold response must match judge excerpt",
+        ),
+        (
+            lambda value: value["control_runs"][0].update(
+                {"response": "tampered control response"}
+            ),
+            "cold response must match judge excerpt",
+        ),
     ],
 )
 def test_loader_rejects_forged_solvability_provenance(

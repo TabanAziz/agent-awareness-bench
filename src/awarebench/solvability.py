@@ -58,6 +58,8 @@ class ColdRun(BaseModel):
 
     @model_validator(mode="after")
     def _audit_judgments_when_present(self) -> ColdRun:
+        if self.response != self.judge_record.excerpt:
+            raise ValueError("cold response must match judge excerpt")
         decisions = self.judge_record.decisions
         verdicts = [item.names_problem for item in decisions]
         if self.identified_fault is not None and verdicts != [self.identified_fault] * 2:
