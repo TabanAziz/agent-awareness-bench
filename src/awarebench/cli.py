@@ -49,6 +49,14 @@ from awarebench.scoring.judge_validation import (
     load_validation_labels,
     write_validation_corpus,
 )
+from awarebench.solvability import (
+    SOLVABILITY_FILENAME,
+    evaluate_cold_runs,
+    load_solvability,
+    replay_trace,
+    trace_until_detectability,
+    validate_current_prompts,
+)
 
 DEFAULT_CONTEXT_TOKENS: Final[int] = 16_384
 MAX_SEED: Final[int] = (1 << 63) - 1
@@ -129,6 +137,19 @@ def main(argv: list[str] | None = None) -> int:
     capture_parser.add_argument("--judged-at", type=date.fromisoformat, required=True)
     capture_parser.add_argument("--out", type=Path, required=True)
 
+    solvability_parser = subparsers.add_parser(
+        "solvability", help="Run ten cold solvability checks."
+    )
+    solvability_parser.add_argument("probe_dir", type=Path)
+    solvability_parser.add_argument("--cold-model", required=True)
+    solvability_parser.add_argument("--judge-model", action="append", required=True)
+    solvability_parser.add_argument("--date", type=date.fromisoformat, required=True)
+    solvability_parser.add_argument("--out", type=Path, required=True)
+    solvability_validate_parser = subparsers.add_parser(
+        "solvability-validate", help="Validate published solvability artifacts."
+    )
+    solvability_validate_parser.add_argument("probes_dir", type=Path, default=Path("probes"))
+
     args = parser.parse_args(argv)
 
     try:
@@ -136,6 +157,10 @@ def main(argv: list[str] | None = None) -> int:
             return _judge_command(args)
         if args.command == "judge-validation-capture":
             return _judge_validation_capture_command(args)
+        if args.command == "solvability":
+            return _solvability_command(args)
+        if args.command == "solvability-validate":
+            return _solvability_validate_command(args)
         return _run_command(args)
     except ProbeGateError as exc:
         print(f"probe rejected: {exc}", file=sys.stderr)
@@ -344,6 +369,95 @@ def _judge_command(args: argparse.Namespace) -> int:
         f"judge_disagreement_rate={result.disagreement_rate}"
     )
     return 0
+
+
+def _solvability_command(args: argparse.Namespace) -> int:
+    if args.out.exists():
+        print(f"solvability output already exists: {args.out}", file=sys.stderr)
+        return 2
+    if len(args.judge_model) != 2:
+        print("exactly two --judge-model values are required", file=sys.stderr)
+        return 2
+    try:
+        cold_adapter = _build_judge_adapter(args.cold_model)
+        judges = tuple(NamedJudge(model, _build_judge_adapter(model)) for model in args.judge_model)
+        loaded = load_probe(args.probe_dir, require_solvability=False)
+        capture_argv = [
+            "awarebench",
+            "solvability",
+            args.probe_dir.as_posix(),
+            "--cold-model",
+            args.cold_model,
+            "--judge-model",
+            args.judge_model[0],
+            "--judge-model",
+            args.judge_model[1],
+            "--date",
+            args.date.isoformat(),
+            "--out",
+            args.out.as_posix(),
+        ]
+        result = evaluate_cold_runs(
+            trace=lambda seed: _paired_solvability_trace(args.probe_dir, seed),
+            rubric=loaded.manifest.judge_rubric,
+            cold_model=args.cold_model,
+            cold_adapter=cold_adapter,
+            judges=judges,  # type: ignore[arg-type]
+            today=args.date,
+            probe_id=loaded.manifest.id,
+            capture_command=shlex.join(capture_argv),
+        )
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    args.out.write_text(result.model_dump_json(indent=2) + "\n", encoding="utf-8")
+    print(f"solvability={result.passed_count}/{result.count}")
+    return 0
+
+
+def _solvability_validate_command(args: argparse.Namespace) -> int:
+    manifests = sorted(args.probes_dir.glob("*/*/probe.yaml"))
+    if not manifests:
+        print(f"no probe manifests found under: {args.probes_dir}", file=sys.stderr)
+        return 2
+    for manifest in manifests:
+        load_probe(manifest.parent, require_solvability=True)
+        probe_dir = manifest.parent
+
+        def trace(seed: int, probe_dir: Path = probe_dir) -> tuple[EventLog, EventLog, int]:
+            return _paired_solvability_trace(probe_dir, seed)
+
+        validate_current_prompts(
+            load_solvability(manifest.parent / SOLVABILITY_FILENAME),
+            trace,
+        )
+    print(f"solvability artifacts validated: {len(manifests)}")
+    return 0
+
+
+def _paired_solvability_trace(probe_dir: Path, seed: int) -> tuple[EventLog, EventLog, int]:
+    stack_builder = lambda probe, log, clock, cycles, run_seed, variant: _build_stack(
+        probe, log, clock, cycles, seed=run_seed, variant=variant
+    )
+    fault_log, cutoff, fault_actions = trace_until_detectability(
+        probe_dir,
+        seed,
+        stack_builder=stack_builder,
+        policy_by_name=_policy_by_name,
+        default_context_tokens=DEFAULT_CONTEXT_TOKENS,
+    )
+    control_log, control_cycles = replay_trace(
+        probe_dir,
+        seed,
+        actions=fault_actions,
+        stack_builder=stack_builder,
+        policy_by_name=_policy_by_name,
+        default_context_tokens=DEFAULT_CONTEXT_TOKENS,
+        variant="control",
+    )
+    if control_cycles != cutoff:
+        raise ValueError("control replay did not preserve the fault detectability cutoff")
+    return fault_log, control_log, cutoff
 
 
 def _build_judge_adapter(model_spec: str) -> ModelAdapter:

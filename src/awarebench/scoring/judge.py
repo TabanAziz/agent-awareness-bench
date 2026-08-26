@@ -346,6 +346,20 @@ def strict_judge_names_problem(raw: str) -> bool:
     return decision
 
 
+def complete_cold_response(adapter: ModelAdapter, prompt: str) -> AdapterResponse:
+    """Complete one neutral cold-evidence request through the approved gateway."""
+    try:
+        response = complete_model(
+            adapter,
+            [{"role": "user", "content": prompt}],
+            temperature=0.0,
+            max_tokens=512,
+        )
+    except AdapterError as exc:
+        raise JudgeError(f"cold solver adapter failed: {exc}") from exc
+    return response
+
+
 def _parse_judge_response(model: str, response: AdapterResponse) -> JudgeDecision:
     raw = response.text
     try:

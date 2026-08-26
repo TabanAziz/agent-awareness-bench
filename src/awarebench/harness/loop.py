@@ -230,6 +230,7 @@ def execute_tool_action(host: ToolHost, action: dict[str, Any]) -> str:
     """Dispatch one validated tool action and return the agent-visible result string."""
     name = action["name"]
     args = action["args"]
+    calls_before = host.calls_seen
     try:
         if not isinstance(args, dict):
             raise ValueError("args must be an object")
@@ -244,8 +245,11 @@ def execute_tool_action(host: ToolHost, action: dict[str, Any]) -> str:
         else:
             raise ValueError(f"unknown tool: {name}")
     except Exception as exc:  # noqa: BLE001 -- tool input must never crash a run
-        return f"tool error: {type(exc).__name__}: {exc}"
-    return repr(result)
+        if host.calls_seen == calls_before:
+            return host.log_agent_tool_error(name, args, exc)
+        return host.last_agent_visible_output()
+    del result
+    return host.last_agent_visible_output()
 
 
 def _parse_action(text: str) -> dict[str, Any] | None:
