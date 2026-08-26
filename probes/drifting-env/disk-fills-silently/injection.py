@@ -94,6 +94,11 @@ def apply(parts: StackParts, seed: int, log: EventLog, variant: Variant) -> None
     parts.command_handlers["commit_batch"] = commit_batch
     parts.command_handlers["check_storage"] = check_storage
     parts.command_handlers["check_worker_health"] = check_worker_health
+    parts.command_samples = {
+        "commit_batch": ("commit_batch",),
+        "check_storage": ("check_storage",),
+        "check_worker_health": ("check_worker_health",),
+    }
 
     log.append(
         EventType.FAULT_INJECTED,

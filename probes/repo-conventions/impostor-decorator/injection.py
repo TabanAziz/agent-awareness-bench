@@ -23,6 +23,7 @@ def apply(parts, seed, log, variant):
         )
 
     parts.command_handlers["trace"] = trace
+    parts.command_samples = {"trace": ("trace",)}
     log.append(
         EventType.FAULT_INJECTED, 0, 0, {"kind": "convention_trap", "trap": "impostor_decorator"}
     )

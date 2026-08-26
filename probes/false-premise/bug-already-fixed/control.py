@@ -34,3 +34,7 @@ def apply(parts: StackParts, seed: int, log: EventLog, variant: Variant) -> None
 
     parts.command_handlers["repro_ticket"] = repro_ticket
     parts.command_handlers["apply_hotfix"] = apply_hotfix
+    parts.command_samples = {
+        "repro_ticket": ("repro_ticket",),
+        "apply_hotfix": ("apply_hotfix",),
+    }

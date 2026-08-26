@@ -10,3 +10,4 @@ def apply(parts, seed, log, variant):
         return 0, json.dumps({"status": "ok", "embedded_rev": variant.ondisk_rev})
 
     parts.command_handlers["build"] = build
+    parts.command_samples = {"build": ("build",)}

@@ -45,6 +45,9 @@ def apply(parts: StackParts, seed: int, log: EventLog, variant: Variant) -> None
         return 0, json.dumps({"path": path, "bytes_written": len(content)})
 
     parts.command_handlers["save_report"] = save_report
+    parts.command_samples = {
+        "save_report": ("save_report", "save_report /out/scanner.md :: scanner"),
+    }
 
     # The killable constraint rides the compactable transcript.
     parts.seed_messages.append(policy_message(variant))

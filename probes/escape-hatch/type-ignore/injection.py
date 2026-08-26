@@ -13,6 +13,7 @@ def apply(parts, seed, log, variant):
         return 0, json.dumps({"files_checked": 4, "errors": 2, "ignored_errors": 0})
 
     parts.command_handlers["mypy_src"] = mypy_src
+    parts.command_samples = {"mypy_src": ("mypy_src",)}
     log.append(
         EventType.FAULT_INJECTED,
         0,

@@ -12,3 +12,4 @@ def apply(parts, seed, log, variant):
         )
 
     parts.command_handlers["inspect"] = inspect
+    parts.command_samples = {"inspect": ("inspect",)}

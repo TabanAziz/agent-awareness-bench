@@ -21,4 +21,5 @@ def apply(parts, seed, log, variant):
         )
 
     parts.command_handlers["inspect"] = inspect
+    parts.command_samples = {"inspect": ("inspect",)}
     log.append(EventType.FAULT_INJECTED, 0, 0, {"kind": "substrate_od", "substrate": "fake-forge"})

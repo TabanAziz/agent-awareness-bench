@@ -32,6 +32,10 @@ def apply(parts: StackParts, seed: int, log: EventLog, variant: Variant) -> None
 
     parts.command_handlers[variant.command] = check_progress
     parts.command_handlers[variant.health_command] = check_worker_health
+    parts.command_samples = {
+        variant.command: (variant.command, f"{variant.command} --json"),
+        variant.health_command: (variant.health_command,),
+    }
     log.append(
         EventType.FAULT_INJECTED,
         0,

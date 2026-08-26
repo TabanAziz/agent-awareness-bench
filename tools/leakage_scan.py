@@ -72,6 +72,7 @@ class ScanResult:
     environments_inspected: int = 0
     stack_instantiations: int = 0
     schedules_inspected: int = 0
+    command_samples_declared: int = 0
     seed_messages_inspected: int = 0
     http_bodies_inspected: int = 0
     virtual_filenames_inspected: int = 0
@@ -230,28 +231,73 @@ def _scan_environment(
     """Scan one seed/variant through shared and per-handler fresh schedules."""
     result.environments_inspected += 1
     parts, log, clock, cycles = _instantiate_stack(probe_dir, seed, variant, result)
-    handlers = sorted(parts.command_handlers)
-    _scan_schedule(
-        root,
-        probe_dir,
-        seed,
-        variant,
-        parts,
-        log,
-        clock,
-        cycles,
-        "round-robin",
-        tuple(handlers[index % len(handlers)] for index in range(HANDLER_OUTPUT_SAMPLES))
-        if handlers
-        else (),
-        result,
+    samples_by_handler = _command_samples(parts, probe_dir, variant, seed)
+    result.command_samples_declared += sum(len(samples) for samples in samples_by_handler.values())
+    handlers = sorted(samples_by_handler)
+    round_robin_samples = tuple(
+        sample for handler in handlers for sample in samples_by_handler[handler]
     )
+    if parts.http_table:
+        # HTTP has a distinct agent-reachable schedule.  Keep every command
+        # schedule at cycles 1..40, matching AgentLoop's run horizon exactly.
+        _scan_schedule(
+            root,
+            probe_dir,
+            seed,
+            variant,
+            parts,
+            log,
+            clock,
+            cycles,
+            "http",
+            (),
+            sample_http=True,
+            result=result,
+        )
+
+    if round_robin_samples:
+        if parts.http_table:
+            parts, log, clock, cycles = _instantiate_stack(probe_dir, seed, variant, result)
+            _require_sample_corpus_matches(samples_by_handler, parts, probe_dir, variant, seed)
+        _scan_schedule(
+            root,
+            probe_dir,
+            seed,
+            variant,
+            parts,
+            log,
+            clock,
+            cycles,
+            "round-robin",
+            tuple(
+                round_robin_samples[index % len(round_robin_samples)]
+                for index in range(HANDLER_OUTPUT_SAMPLES)
+            ),
+            sample_http=False,
+            result=result,
+        )
+    elif not parts.http_table:
+        _scan_schedule(
+            root,
+            probe_dir,
+            seed,
+            variant,
+            parts,
+            log,
+            clock,
+            cycles,
+            "surfaces-only",
+            (),
+            sample_http=False,
+            result=result,
+        )
 
     for command in handlers:
         fresh_parts, fresh_log, fresh_clock, fresh_cycles = _instantiate_stack(
             probe_dir, seed, variant, result
         )
         _require_handlers(fresh_parts, (command,), probe_dir, variant, seed)
+        _require_sample_corpus_matches(samples_by_handler, fresh_parts, probe_dir, variant, seed)
         _scan_schedule(
             root,
             probe_dir,
@@ -262,8 +308,12 @@ def _scan_environment(
             fresh_clock,
             fresh_cycles,
             f"handler={command}",
-            (command,) * HANDLER_OUTPUT_SAMPLES,
-            result,
+            tuple(
+                samples_by_handler[command][index % len(samples_by_handler[command])]
+                for index in range(HANDLER_OUTPUT_SAMPLES)
+            ),
+            sample_http=False,
+            result=result,
         )
 
     for mutator in handlers:
@@ -275,6 +325,9 @@ def _scan_environment(
                     probe_dir, seed, variant, result
                 )
                 _require_handlers(fresh_parts, (mutator, reader), probe_dir, variant, seed)
+                _require_sample_corpus_matches(
+                    samples_by_handler, fresh_parts, probe_dir, variant, seed
+                )
                 _scan_schedule(
                     root,
                     probe_dir,
@@ -285,8 +338,15 @@ def _scan_environment(
                     fresh_clock,
                     fresh_cycles,
                     f"cutover={mutator}-to-{reader} k={cutover}",
-                    (mutator,) * cutover + (reader,),
-                    result,
+                    tuple(
+                        samples_by_handler[mutator][index % len(samples_by_handler[mutator])]
+                        for index in range(cutover)
+                    )
+                    + (
+                        samples_by_handler[reader][(cutover - 1) % len(samples_by_handler[reader])],
+                    ),
+                    sample_http=False,
+                    result=result,
                 )
 
 
@@ -304,6 +364,55 @@ def _require_handlers(
                 f"cannot inspect {probe_dir} ({variant}, seed {seed}): "
                 f"handler {command!r} is absent from its fresh schedule"
             )
+
+
+def _command_samples(
+    parts: StackParts, probe_dir: Path, variant: str, seed: int
+) -> dict[str, tuple[str, ...]]:
+    """Validate the explicit full-command corpus against ToolHost prefix rules."""
+    handlers = set(parts.command_handlers)
+    corpus_keys = set(parts.command_samples)
+    missing = sorted(handlers - corpus_keys)
+    extra = sorted(corpus_keys - handlers)
+    if missing or extra:
+        raise ScanError(
+            f"invalid command samples for {probe_dir} ({variant}, seed {seed}): "
+            f"missing={missing}, extra={extra}"
+        )
+    validated: dict[str, tuple[str, ...]] = {}
+    for prefix in sorted(handlers):
+        samples = parts.command_samples[prefix]
+        if not samples or not all(isinstance(sample, str) and sample for sample in samples):
+            raise ScanError(
+                f"invalid command samples for {probe_dir} ({variant}, seed {seed}): "
+                f"handler {prefix!r} requires one or more non-empty strings"
+            )
+        for sample in samples:
+            matches = [candidate for candidate in handlers if sample.startswith(candidate)]
+            resolved = max(matches, key=len) if matches else None
+            if resolved != prefix:
+                raise ScanError(
+                    f"invalid command samples for {probe_dir} ({variant}, seed {seed}): "
+                    f"sample {sample!r} does not resolve to handler {prefix!r}"
+                )
+        validated[prefix] = tuple(samples)
+    return validated
+
+
+def _require_sample_corpus_matches(
+    expected: dict[str, tuple[str, ...]],
+    parts: StackParts,
+    probe_dir: Path,
+    variant: str,
+    seed: int,
+) -> None:
+    """Fresh schedules must retain the exact validated command corpus."""
+    actual = _command_samples(parts, probe_dir, variant, seed)
+    if actual != expected:
+        raise ScanError(
+            f"command samples changed across fresh schedules for {probe_dir} "
+            f"({variant}, seed {seed})"
+        )
 
 
 def _instantiate_stack(
@@ -334,6 +443,8 @@ def _scan_schedule(
     cycles: CycleCounter,
     schedule: str,
     commands: tuple[str, ...],
+    *,
+    sample_http: bool,
     result: ScanResult,
 ) -> None:
     """Scan one fresh stack through exact ToolHost-visible values."""
@@ -382,25 +493,26 @@ def _scan_schedule(
         cycles.advance()
         clock.advance_us(DEFAULT_CYCLE_STEP_US)
 
-    for url in sorted(parts.http_table):
-        advance()
-        try:
-            response = host.http_get(url)
-        except Exception as exc:
-            raise ScanError(
-                f"cannot inspect HTTP output for {probe_dir} "
-                f"({variant}, seed {seed}, url {url}): {exc}"
-            ) from exc
-        result.http_bodies_inspected += 1
-        surfaces_inspected += 1
-        result.leaks.extend(_check_text(repr(response), f"{source} http={url}", patterns))
-        result.virtual_state_rescans += 1
-        scan_virtual_files(f"after-http={url}")
+    if sample_http:
+        for url in sorted(parts.http_table):
+            advance()
+            try:
+                http_response: tuple[str, int] = host.http_get(url)
+            except Exception as exc:
+                raise ScanError(
+                    f"cannot inspect HTTP output for {probe_dir} "
+                    f"({variant}, seed {seed}, url {url}): {exc}"
+                ) from exc
+            result.http_bodies_inspected += 1
+            surfaces_inspected += 1
+            result.leaks.extend(_check_text(repr(http_response), f"{source} http={url}", patterns))
+            result.virtual_state_rescans += 1
+            scan_virtual_files(f"after-http={url}")
 
     for step, command in enumerate(commands, start=1):
         advance()
         try:
-            response = host.run_command(command)
+            command_response: tuple[int, str] = host.run_command(command)
         except Exception as exc:
             raise ScanError(
                 f"cannot inspect command output for {probe_dir} "
@@ -408,7 +520,9 @@ def _scan_schedule(
             ) from exc
         result.command_outputs_inspected += 1
         surfaces_inspected += 1
-        result.leaks.extend(_check_text(repr(response), f"{source} command={command}", patterns))
+        result.leaks.extend(
+            _check_text(repr(command_response), f"{source} command={command}", patterns)
+        )
         result.virtual_state_rescans += 1
         scan_virtual_files(f"after-step={step} command={command}")
 
@@ -454,6 +568,7 @@ def _report_counts(result: ScanResult, *, stream: TextIO) -> None:
         f"{result.environments_inspected} environments, "
         f"{result.stack_instantiations} stack instantiations, "
         f"{result.schedules_inspected} schedules, "
+        f"{result.command_samples_declared} declared command samples, "
         f"{result.seed_messages_inspected} seed messages, "
         f"{result.http_bodies_inspected} HTTP bodies, "
         f"{result.virtual_filenames_inspected} virtual filenames, "

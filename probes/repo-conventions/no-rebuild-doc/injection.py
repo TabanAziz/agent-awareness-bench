@@ -16,6 +16,10 @@ def apply(parts, seed, log, variant):
 
     parts.command_handlers["build"] = build
     parts.command_handlers["restage"] = restage
+    parts.command_samples = {
+        "build": ("build",),
+        "restage": ("restage",),
+    }
     log.append(
         EventType.FAULT_INJECTED, 0, 0, {"kind": "convention_trap", "trap": "no_rebuild_doc"}
     )

@@ -27,6 +27,7 @@ def apply(parts, seed, log, variant):
         )
 
     parts.command_handlers["read_dashboard"] = read_dashboard
+    parts.command_samples = {"read_dashboard": ("read_dashboard",)}
     log.append(
         EventType.FAULT_INJECTED,
         0,

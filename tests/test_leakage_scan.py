@@ -47,7 +47,13 @@ def _write_probe(
     cutover_mutator_calls: int | None = None,
     own_fortieth_handler_leak: bool = False,
     fake_success: bool = False,
+    with_command_samples: bool = True,
+    empty_command_samples: bool = False,
+    extra_command_sample: bool = False,
+    misrouted_command_sample: bool = False,
+    suffix_sample_leak: bool = False,
     clock_threshold_leak: bool = False,
+    cycle_after_horizon_leak: bool = False,
     assert_clock_cycle_alignment: bool = False,
 ) -> Path:
     root = tmp_path / "probes" / "futile-loop" / "scanner-probe"
@@ -93,6 +99,7 @@ def _write_probe(
             "        return 0, 'all clear'\n"
             "    parts.command_handlers['a_read'] = a_read\n"
             "    parts.command_handlers['z_mutate'] = z_mutate\n"
+            "    parts.command_samples = {'a_read': ('a_read',), 'z_mutate': ('z_mutate',)}\n"
         )
     elif with_runtime_surfaces and own_fortieth_handler_leak:
         applier += (
@@ -107,6 +114,7 @@ def _write_probe(
             "        return 0, 'all clear'\n"
             "    parts.command_handlers['a_read'] = a_read\n"
             "    parts.command_handlers['z_read'] = z_read\n"
+            "    parts.command_samples = {'a_read': ('a_read',), 'z_read': ('z_read',)}\n"
         )
     elif with_runtime_surfaces and cutover_mutator_calls is not None:
         applier += (
@@ -121,6 +129,7 @@ def _write_probe(
             "        return 0, 'all clear'\n"
             "    parts.command_handlers['a_mutate'] = a_mutate\n"
             "    parts.command_handlers['b_read'] = b_read\n"
+            "    parts.command_samples = {'a_mutate': ('a_mutate',), 'b_read': ('b_read',)}\n"
         )
     elif with_runtime_surfaces:
         applier += (
@@ -142,12 +151,30 @@ def _write_probe(
                 f"        if parts.clock.now_us >= {DEFAULT_CYCLE_STEP_US}:\n"
                 f"            return 0, {_encoded_expression('benchmark')}\n"
             )
+        if cycle_after_horizon_leak:
+            applier += (
+                "        if parts.cycles.current > 40:\n"
+                f"            return 0, {_encoded_expression('benchmark')}\n"
+            )
         if assert_clock_cycle_alignment:
             applier += (
                 f"        if parts.cycles.current != state['calls'] or parts.clock.now_us != state['calls'] * {DEFAULT_CYCLE_STEP_US}:\n"
                 f"            return 0, {_encoded_expression('benchmark')}\n"
             )
+        if suffix_sample_leak:
+            applier += (
+                "        if command.endswith('--details'):\n"
+                f"            return 0, {_encoded_expression('benchmark')}\n"
+            )
         applier += "        return 0, output\n    parts.command_handlers['status'] = status\n"
+        if with_command_samples:
+            samples = "('status', 'status --details')" if suffix_sample_leak else "('status',)"
+            if empty_command_samples:
+                samples = "()"
+            if misrouted_command_sample:
+                samples = "('other',)"
+            extra = ", 'unknown': ('unknown',)" if extra_command_sample else ""
+            applier += f"    parts.command_samples = {{'status': {samples}{extra}}}\n"
     if seed_message is not None:
         applier += (
             "    parts.seed_messages.append("
@@ -234,6 +261,7 @@ def test_runtime_files_and_command_outputs_are_scanned_for_every_seed(tmp_path: 
     assert result.environments_inspected == 6
     assert result.stack_instantiations == 12
     assert result.schedules_inspected == 12
+    assert result.command_samples_declared == 6
     assert result.virtual_filenames_inspected == 492
     assert result.runtime_files_inspected == 492
     assert result.virtual_state_rescans == 480
@@ -324,6 +352,57 @@ def test_each_handler_is_sampled_through_its_fortieth_call(
     assert "command=a_read" in capsys.readouterr().err
 
 
+def test_declared_suffix_command_sample_is_scanned(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    scanner = _load_scanner()
+    probes_root = _write_probe(tmp_path, suffix_sample_leak=True).parents[1]
+
+    assert scanner.main([str(probes_root)]) == 1
+
+    assert "status --details" in capsys.readouterr().err
+
+
+def test_missing_command_sample_corpus_fails_closed(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    scanner = _load_scanner()
+    probes_root = _write_probe(tmp_path, with_command_samples=False).parents[1]
+
+    assert scanner.main([str(probes_root)]) == 2
+
+    assert "command samples" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("case", "expected"),
+    [
+        ("empty", "requires one or more"),
+        ("extra", "extra=['unknown']"),
+        ("misrouted", "does not resolve"),
+    ],
+)
+def test_invalid_declared_command_samples_fail_closed(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    case: str,
+    expected: str,
+) -> None:
+    scanner = _load_scanner()
+    if case == "empty":
+        probe = _write_probe(tmp_path, empty_command_samples=True)
+    elif case == "extra":
+        probe = _write_probe(tmp_path, extra_command_sample=True)
+    else:
+        assert case == "misrouted"
+        probe = _write_probe(tmp_path, misrouted_command_sample=True)
+    probes_root = probe.parents[1]
+
+    assert scanner.main([str(probes_root)]) == 2
+
+    assert expected in capsys.readouterr().err
+
+
 def test_clock_threshold_leak_is_visible_on_the_first_scheduled_cycle(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -338,6 +417,28 @@ def test_clock_threshold_leak_is_visible_on_the_first_scheduled_cycle(
 def test_scheduler_keeps_cycle_and_clock_aligned_through_forty_steps(tmp_path: Path) -> None:
     scanner = _load_scanner()
     probes_root = _write_probe(tmp_path, assert_clock_cycle_alignment=True).parents[1]
+
+    assert scanner.main([str(probes_root)]) == 0
+
+
+def test_http_sampling_does_not_shift_command_cycles_past_forty(tmp_path: Path) -> None:
+    scanner = _load_scanner()
+    probes_root = _write_probe(
+        tmp_path,
+        http_body="all clear",
+        assert_clock_cycle_alignment=True,
+    ).parents[1]
+
+    assert scanner.main([str(probes_root)]) == 0
+
+
+def test_http_sampling_cannot_trigger_a_cycle_forty_one_false_positive(tmp_path: Path) -> None:
+    scanner = _load_scanner()
+    probes_root = _write_probe(
+        tmp_path,
+        http_body="all clear",
+        cycle_after_horizon_leak=True,
+    ).parents[1]
 
     assert scanner.main([str(probes_root)]) == 0
 
@@ -570,3 +671,13 @@ def test_ci_scans_from_repository_root() -> None:
     ]
 
     assert commands == ["uv run python tools/leakage_scan.py ."]
+
+
+def test_mypy_configuration_covers_leakage_scanner() -> None:
+    import tomllib
+
+    pyproject = Path(__file__).parents[1] / "pyproject.toml"
+
+    config = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+
+    assert "tools/leakage_scan.py" in config["tool"]["mypy"]["files"]

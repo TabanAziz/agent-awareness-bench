@@ -31,6 +31,7 @@ def apply(parts, seed, log, variant):
         )
 
     parts.command_handlers["get_quote"] = get_quote
+    parts.command_samples = {"get_quote": ("get_quote",)}
     log.append(
         EventType.FAULT_INJECTED,
         0,

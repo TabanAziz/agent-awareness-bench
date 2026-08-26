@@ -64,6 +64,11 @@ def apply(parts: StackParts, seed: int, log: EventLog, variant: Variant) -> None
     parts.command_handlers["bridge_update"] = bridge_update
     parts.command_handlers["append_note"] = append_note
     parts.command_handlers["save_report"] = save_report
+    parts.command_samples = {
+        "bridge_update": ("bridge_update",),
+        "append_note": ("append_note", "append_note scanner update"),
+        "save_report": ("save_report", "save_report /out/scanner.md :: scanner"),
+    }
 
     log.append(
         EventType.FAULT_INJECTED,
