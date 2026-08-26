@@ -46,6 +46,7 @@ def _write_probe(
     cross_handler_leak: bool = False,
     cutover_mutator_calls: int | None = None,
     cutover_suffix_leak: bool = False,
+    same_handler_cutover_leak: bool = False,
     own_fortieth_handler_leak: bool = False,
     own_fortieth_suffix_leak: bool = False,
     fake_success: bool = False,
@@ -135,6 +136,19 @@ def _write_probe(
             "    parts.command_handlers['b_read'] = b_read\n"
             "    parts.command_samples = {'a_mutate': ('a_mutate', 'a_mutate --details'), "
             "'b_read': ('b_read', 'b_read --details')}\n"
+        )
+    elif with_runtime_surfaces and same_handler_cutover_leak:
+        applier += (
+            f"    parts.fs.write({runtime_filename_expression}, {runtime_expression})\n"
+            "    state = {'armed': 0}\n"
+            "    def status(command):\n"
+            "        if command.endswith('--arm'):\n"
+            "            state['armed'] += 1\n"
+            "        if command.endswith('--read') and state['armed'] == 21:\n"
+            f"            return 0, {_encoded_expression('benchmark')}\n"
+            "        return 0, 'all clear'\n"
+            "    parts.command_handlers['status'] = status\n"
+            "    parts.command_samples = {'status': ('status --arm', 'status --read')}\n"
         )
     elif with_runtime_surfaces:
         applier += (
@@ -403,6 +417,17 @@ def test_cutover_enumerates_reader_suffix_samples_after_twenty_one_mutations(
     assert scanner.main([str(probes_root)]) == 1
 
     assert "command=b_read --details" in capsys.readouterr().err
+
+
+def test_cutover_enumerates_distinct_samples_for_the_same_handler(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    scanner = _load_scanner()
+    probes_root = _write_probe(tmp_path, same_handler_cutover_leak=True).parents[1]
+
+    assert scanner.main([str(probes_root)]) == 1
+
+    assert "command=status --read" in capsys.readouterr().err
 
 
 def test_missing_command_sample_corpus_fails_closed(

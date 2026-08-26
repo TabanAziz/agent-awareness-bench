@@ -318,10 +318,13 @@ def _scan_environment(
 
     for mutator in handlers:
         for reader in handlers:
-            if mutator == reader:
-                continue
             for mutator_sample in samples_by_handler[mutator]:
                 for reader_sample in samples_by_handler[reader]:
+                    # A single handler can expose stateful argument branches.
+                    # Its identical sample is already covered by the isolated
+                    # forty-call schedule above; distinct samples need cutovers.
+                    if mutator == reader and mutator_sample == reader_sample:
+                        continue
                     for cutover in range(1, HANDLER_OUTPUT_SAMPLES):
                         fresh_parts, fresh_log, fresh_clock, fresh_cycles = _instantiate_stack(
                             probe_dir, seed, variant, result

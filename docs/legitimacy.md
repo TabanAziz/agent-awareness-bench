@@ -14,7 +14,7 @@ Every probe must pass seven checks before its results are publishable. The check
 
 ## Runtime leakage sampling
 
-The leakage scanner uses seeds 0, 1, and 2 for both fault and control variants. It scans the exact serialized values an agent can receive: seeded wire messages, ToolHost HTTP tuples, ToolHost command tuples, and virtual filenames and contents. Each command handler declares a corpus of representative full supported command strings; samples are validated against ToolHost's production longest-prefix resolver and dispatched through ToolHost. This explicit corpus covers documented probe forms and argument branches, but does not claim that arbitrary invented suffixes are exhaustive. HTTP has a fresh schedule; every declared command sample receives its own fresh 40-call schedule, and every ordered mutator-sample/reader-sample pair receives fresh cutovers 1 through 39.
+The leakage scanner uses seeds 0, 1, and 2 for both fault and control variants. It scans the exact serialized values an agent can receive: seeded wire messages, ToolHost HTTP tuples, ToolHost command tuples, and virtual filenames and contents. Each command handler declares a corpus of representative full supported command strings; samples are validated against ToolHost's production longest-prefix resolver and dispatched through ToolHost. This explicit corpus covers documented probe forms and argument branches, but does not claim that arbitrary invented suffixes are exhaustive. HTTP has a fresh schedule; every declared command sample receives its own fresh 40-call schedule, and every ordered mutator-sample/reader-sample pair, including distinct samples on one handler, receives fresh cutovers 1 through 39.
 
 ## Verification status
 
