@@ -35,6 +35,11 @@ from awarebench.solvability import (
 
 
 def _tool_result(cycle: int, output: object) -> dict[str, Any]:
+    agent_visible = (
+        repr((output[0], output[1]))
+        if isinstance(output, list) and len(output) == 2
+        else repr(output)
+    )
     return {
         "seq": cycle,
         "cycle": cycle,
@@ -44,6 +49,7 @@ def _tool_result(cycle: int, output: object) -> dict[str, Any]:
             "call_id": f"call-{cycle}",
             "tool": "run_command",
             "output": output,
+            "agent_visible": agent_visible,
             "gt": {"secret": True},
         },
     }
@@ -91,7 +97,12 @@ def test_transcript_reconstructor_uses_tool_call_metadata_from_real_events() -> 
         EventType.TOOL_RESULT,
         1,
         1,
-        {"call_id": "one", "output": [0, "evidence"], "gt": {"hidden": True}},
+        {
+            "call_id": "one",
+            "output": [0, "evidence"],
+            "agent_visible": "(0, 'evidence')",
+            "gt": {"hidden": True},
+        },
     )
 
     assert tool_outputs_through_detectability(list(log), detectability_cycle=1) == (
@@ -105,13 +116,30 @@ def test_search_with_two_hits_is_not_misread_as_a_two_item_tool_tuple() -> None:
         {
             "cycle": 1,
             "type": "tool_result",
-            "payload": {"call_id": "s", "output": [["a.py", 1], ["b.py", 2]]},
+            "payload": {
+                "call_id": "s",
+                "output": [["a.py", 1], ["b.py", 2]],
+                "agent_visible": "[('a.py', 1), ('b.py', 2)]",
+            },
         },
     ]
 
     assert tool_outputs_through_detectability(events, detectability_cycle=1) == (
         "[('a.py', 1), ('b.py', 2)]",
     )
+
+
+def test_cold_evidence_rejects_tool_results_without_exact_agent_visible_text() -> None:
+    events = [
+        {
+            "cycle": 1,
+            "type": "tool_result",
+            "payload": {"call_id": "missing", "output": [0, "evidence"]},
+        }
+    ]
+
+    with pytest.raises(ValueError, match="agent_visible"):
+        tool_outputs_through_detectability(events, detectability_cycle=1)
 
 
 def test_cold_prompt_matches_actual_agentloop_tool_messages_through_t_dp(tmp_path: Path) -> None:
@@ -167,6 +195,71 @@ def test_cold_prompt_matches_actual_agentloop_tool_messages_through_t_dp(tmp_pat
     ) + b"\n" + COLD_QUESTION.encode("utf-8")
     assert manifest.task.encode("utf-8") not in prompt
     assert b"read_file" not in prompt
+
+
+def test_every_agentloop_tool_result_persists_the_exact_context_message(tmp_path: Path) -> None:
+    manifest = ProbeManifest.model_validate(_manifest())
+    probe = LoadedProbe(
+        manifest=manifest,
+        probe_dir=tmp_path,
+        environment_dockerfile=tmp_path / "Dockerfile",
+        injection=tmp_path / "injection.py",
+        control=tmp_path / "control.py",
+        generator=tmp_path / "generator.py",
+    )
+    log = EventLog()
+    clock = VirtualClock()
+    cycles = CycleCounter()
+    budget = BudgetAccountant()
+    filesystem = VirtualFilesystem()
+    filesystem.write("alpha.txt", "alpha\nbeta\n")
+
+    def command(command: str) -> tuple[int, str]:
+        if command == "explode":
+            raise RuntimeError("handler exploded")
+        return 0, "command output"
+
+    host = ToolHost(
+        log,
+        clock,
+        cycles,
+        budget,
+        filesystem,
+        FaultSet(),
+        {"command": command, "explode": command},
+        {"/config": [("http body", 1)]},
+    )
+    actions = [
+        '{"action":{"type":"tool","name":"read_file","args":{"path":"alpha.txt"}}}',
+        '{"action":{"type":"tool","name":"run_command","args":{"command":"command"}}}',
+        '{"action":{"type":"tool","name":"search_code","args":{"pattern":"alpha"}}}',
+        '{"action":{"type":"tool","name":"http_get","args":{"url":"/config"}}}',
+        '{"action":{"type":"tool","name":"run_command","args":{"command":"explode"}}}',
+    ]
+    context = ContextWindow(log, clock, cycles, max_tokens=1024, policy=drop_oldest)
+    AgentLoop(
+        probe=probe,
+        adapter=StubAdapter(actions),
+        host=host,
+        context=context,
+        budget=budget,
+        log=log,
+        clock=clock,
+        cycles=cycles,
+        max_cycles=len(actions),
+    ).run()
+
+    visible = [
+        event.payload["agent_visible"] for event in log if event.type == EventType.TOOL_RESULT
+    ]
+    user_messages = [
+        message["content"] for message in context.wire_transcript() if message["role"] == "user"
+    ]
+    assert visible == user_messages
+    assert visible[-1] == "tool error: RuntimeError: handler exploded"
+    assert tool_outputs_through_detectability(list(log), detectability_cycle=len(actions)) == tuple(
+        visible
+    )
 
 
 @pytest.mark.parametrize("manifest", sorted(Path("probes").glob("*/*/probe.yaml")))
@@ -406,7 +499,7 @@ def _result(passing: int) -> dict[str, Any]:
                         {
                             "model": "openai:judge-a",
                             "names_problem": index < passing,
-                            "raw_response": "{}",
+                            "raw_response": json.dumps({"names_problem": index < passing}),
                             "response_model": "judge-a-resolved",
                             "request_id": f"judge-a-{index}",
                             "prompt_tokens": 1,
@@ -416,7 +509,7 @@ def _result(passing: int) -> dict[str, Any]:
                         {
                             "model": "openai:judge-b",
                             "names_problem": index < passing,
-                            "raw_response": "{}",
+                            "raw_response": json.dumps({"names_problem": index < passing}),
                             "response_model": "judge-b-resolved",
                             "request_id": f"judge-b-{index}",
                             "prompt_tokens": 1,
@@ -452,7 +545,7 @@ def _result(passing: int) -> dict[str, Any]:
                         {
                             "model": "openai:judge-a",
                             "names_problem": False,
-                            "raw_response": "{}",
+                            "raw_response": json.dumps({"names_problem": False}),
                             "response_model": "judge-a-resolved",
                             "request_id": f"control-judge-a-{index}",
                             "prompt_tokens": 1,
@@ -462,7 +555,7 @@ def _result(passing: int) -> dict[str, Any]:
                         {
                             "model": "openai:judge-b",
                             "names_problem": False,
-                            "raw_response": "{}",
+                            "raw_response": json.dumps({"names_problem": False}),
                             "response_model": "judge-b-resolved",
                             "request_id": f"control-judge-b-{index}",
                             "prompt_tokens": 1,
@@ -513,6 +606,7 @@ def test_solvability_loader_accepts_exactly_eight_of_ten(tmp_path: Path) -> None
 @pytest.mark.parametrize(
     ("mutate", "message"),
     [
+        (lambda value: value.update({"schema_version": 2}), "schema_version"),
         (lambda value: value.update({"requested_model": "foo:model"}), "unsupported model backend"),
         (lambda value: value.update({"capture_command": "x"}), "capture command"),
         (lambda value: value["runs"][0].update({"prompt_digest": "b" * 64}), "prompt digest"),
@@ -521,6 +615,24 @@ def test_solvability_loader_accepts_exactly_eight_of_ten(tmp_path: Path) -> None
                 {"request_id": None}
             ),
             "judge decision provenance",
+        ),
+        (
+            lambda value: value["control_runs"][0]["judge_record"]["decisions"][0].update(
+                {"request_id": value["runs"][0]["judge_record"]["decisions"][0]["request_id"]}
+            ),
+            "judge request ids",
+        ),
+        (
+            lambda value: value["runs"][0]["judge_record"]["decisions"][0].update(
+                {"raw_response": "not strict JSON"}
+            ),
+            "strict judge JSON",
+        ),
+        (
+            lambda value: value["runs"][0]["judge_record"]["decisions"][0].update(
+                {"raw_response": '{"names_problem": false}'}
+            ),
+            "raw_response must match names_problem",
         ),
     ],
 )

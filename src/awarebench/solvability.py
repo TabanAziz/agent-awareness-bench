@@ -8,12 +8,16 @@ import shlex
 from collections.abc import Callable, Sequence
 from datetime import date
 from pathlib import Path
-from typing import Any, Final
+from typing import Any, Final, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from awarebench.events import Event, EventLog, EventType
-from awarebench.scoring.judge import JudgeRecord, canonical_judge_model
+from awarebench.scoring.judge import (
+    JudgeRecord,
+    canonical_judge_model,
+    strict_judge_names_problem,
+)
 
 SOLVABILITY_FILENAME: Final[str] = "solvability.json"
 COLD_QUESTION: Final[str] = "what is wrong here?"
@@ -68,7 +72,7 @@ class SolvabilityResult(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    schema_version: int = 1
+    schema_version: Literal[1] = 1
     probe_id: str = Field(min_length=1)
     requested_model: str = Field(min_length=1)
     captured_at: date
@@ -131,6 +135,17 @@ class SolvabilityResult(BaseModel):
                     raise ValueError("judge decision provenance is required")
                 if decision.prompt_tokens is None or decision.completion_tokens is None:
                     raise ValueError("judge token provenance is required")
+                try:
+                    parsed_verdict = strict_judge_names_problem(decision.raw_response)
+                except ValueError as exc:
+                    raise ValueError("judge raw_response must be strict judge JSON") from exc
+                if parsed_verdict is not decision.names_problem:
+                    raise ValueError("judge raw_response must match names_problem")
+        judge_request_ids = [
+            decision.request_id for run in all_runs for decision in run.judge_record.decisions
+        ]
+        if len(set(judge_request_ids)) != len(judge_request_ids):
+            raise ValueError("judge request ids must be unique across both arms")
         if self.capture_command != shlex.join(self.capture_argv):
             raise ValueError("capture command does not match capture argv")
         if self.passed_count < self.threshold:
@@ -183,19 +198,12 @@ def validate_current_prompts(
 
 
 def agent_visible_tool_output(event: Event | dict[str, Any]) -> str:
-    """Reconstruct precisely the result string AgentLoop added to its context."""
+    """Read the exact AgentLoop context string durably stored with a tool result."""
     payload = _payload(event)
-    output = payload["output"]
-    tool = payload.get("tool")
-    if tool == "search_code":
-        if not isinstance(output, list):
-            raise ValueError("search output must be a list")
-        return repr([tuple(item) if isinstance(item, list) else item for item in output])
-    if tool == "run_command" or (isinstance(output, list) and len(output) == 2):
-        if not isinstance(output, list) or len(output) != 2:
-            raise ValueError("tool result output must be a two-item list")
-        return repr((output[0], output[1]))
-    return repr(output)
+    visible = payload.get("agent_visible")
+    if not isinstance(visible, str):
+        raise ValueError("tool result agent_visible must be a string")
+    return visible
 
 
 def tool_outputs_through_detectability(
@@ -203,27 +211,11 @@ def tool_outputs_through_detectability(
 ) -> tuple[str, ...]:
     """Return only the tool-result strings actually delivered through inclusive t_DP."""
     outputs: list[str] = []
-    tools_by_call_id: dict[str, str] = {}
     for event in events:
         cycle = event.cycle if isinstance(event, Event) else event["cycle"]
         event_type = event.type if isinstance(event, Event) else event["type"]
-        payload = _payload(event)
-        if event_type == EventType.TOOL_CALL:
-            call_id = payload.get("call_id")
-            tool = payload.get("tool")
-            if isinstance(call_id, str) and isinstance(tool, str):
-                tools_by_call_id[call_id] = tool
         if cycle <= detectability_cycle and event_type == EventType.TOOL_RESULT:
-            call_id = payload.get("call_id")
-            tool = tools_by_call_id.get(call_id) if isinstance(call_id, str) else None
-            output_event = event
-            if tool is not None and "tool" not in payload:
-                output_event = {
-                    "cycle": cycle,
-                    "type": event_type,
-                    "payload": {**payload, "tool": tool},
-                }
-            outputs.append(agent_visible_tool_output(output_event))
+            outputs.append(agent_visible_tool_output(event))
     return tuple(outputs)
 
 
@@ -426,9 +418,20 @@ def replay_trace(
         raise ValueError("control replay failed before completing fault action sequence")
     calls = [event for event in log if event.type == EventType.TOOL_CALL]
     results = [event for event in log if event.type == EventType.TOOL_RESULT]
-    if cycles.current != len(actions) or len(calls) != len(actions) or len(results) != len(actions):
+    if (
+        cycles.current != len(actions)
+        or len(calls) != len(actions)
+        or len(results) != len(actions)
+        or any(_replay_result_is_invalid(event) for event in results)
+    ):
         raise ValueError("control replay could not execute a fault action without substitution")
     return log, cycles.current
+
+
+def _replay_result_is_invalid(event: Event) -> bool:
+    """Reject incomplete or failing replay results rather than substituting a control action."""
+    visible = event.payload.get("agent_visible")
+    return not isinstance(visible, str) or visible.startswith("tool error:")
 
 
 def _observation_actions(parts: Any, probe_id: str) -> list[str]:
