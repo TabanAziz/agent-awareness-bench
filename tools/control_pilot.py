@@ -1,6 +1,5 @@
 """Control arm runs for the pilot."""
 
-import json
 import os
 import sys
 from pathlib import Path

@@ -1,6 +1,5 @@
 """Quick pilot: 2 models × 2 seeds on progress-plateau fault arm."""
 
-import json
 import os
 import sys
 from pathlib import Path
