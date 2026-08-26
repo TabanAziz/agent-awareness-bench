@@ -15,7 +15,7 @@ import json
 import sys
 from pathlib import Path
 
-from awarebench.cli import DEFAULT_CONTEXT_TOKENS, _build_stack, _policy_by_name
+from awarebench.cli import DEFAULT_CONTEXT_TOKENS, _build_stack, _policy_by_name, _require_seed
 from awarebench.events import EventLog, EventType
 from awarebench.harness.budget import BudgetAccountant
 from awarebench.harness.clock import CycleCounter, VirtualClock
@@ -53,6 +53,12 @@ def main() -> int:
     args = parser.parse_args()
     if args.max_cycles <= 0:
         parser.error("--max-cycles must be positive")
+    if args.context_tokens <= 0:
+        parser.error("--context-tokens must be positive")
+    try:
+        _require_seed(args.seed)
+    except ValueError as exc:
+        parser.error(str(exc))
 
     loaded = load_probe(Path(args.probe))
     out_dir = Path(args.out) / loaded.manifest.id / f"human-{args.variant}-s{args.seed}"
@@ -123,25 +129,31 @@ def main() -> int:
         if user_input.lower() in ("quit", "exit"):
             break
 
-        cycles.advance()
-        clock.advance_us(DEFAULT_CYCLE_STEP_US)
-
         if user_input.lower().startswith("report ") or user_input.lower() == "report":
+            cycles.advance()
+            clock.advance_us(DEFAULT_CYCLE_STEP_US)
             report_text = user_input[7:].strip() if len(user_input) > 7 else ""
             log.append(EventType.REPORT, cycles.current, clock.now_us, {"report": report_text})
             print(f"\n=== Report filed at cycle {cycles.current} ===")
             print(f"Text: {report_text}\n")
             break
 
-        action_text = user_input
         try:
             action = _parse_tool_input(user_input)
+        except ValueError as exc:
+            print(f"input error: {exc}")
+            continue
+
+        cycles.advance()
+        clock.advance_us(DEFAULT_CYCLE_STEP_US)
+        action_text = user_input
+        try:
             context.add("assistant", action_text)
             result_text = execute_tool_action(host, action)
             context.add("user", result_text)
             print(result_text)
         except ValueError as exc:
-            print(f"input error: {exc}")
+            print(f"context error: {exc}")
 
     if cycles.current >= args.max_cycles and not any(
         event.type == EventType.REPORT for event in log

@@ -11,7 +11,8 @@ from typing import Any, Final
 import yaml
 
 from awarebench.adapters import AdapterError, AdapterResponse, StubAdapter
-from awarebench.events import EventLog, EventType
+from awarebench.adapters.base import AdapterMessage
+from awarebench.events import EventLog, EventType, JsonValue
 from awarebench.harness.budget import BudgetAccountant
 from awarebench.harness.clock import CycleCounter, VirtualClock
 from awarebench.harness.context import ContextWindow
@@ -142,11 +143,11 @@ class _RecordingScriptAdapter:
 
     def __init__(self, responses: Sequence[str]) -> None:
         self._stub = StubAdapter(responses)
-        self.calls: list[list[dict[str, str]]] = []
+        self.calls: list[list[AdapterMessage]] = []
 
     def complete(
         self,
-        messages: Sequence[dict[str, str]],
+        messages: Sequence[AdapterMessage],
         *,
         temperature: float = 0.0,
         max_tokens: int | None = None,
@@ -162,7 +163,7 @@ class _RecordingScriptAdapter:
 class _ReasoningAdapter:
     def complete(
         self,
-        messages: Sequence[dict[str, str]],
+        messages: Sequence[AdapterMessage],
         *,
         temperature: float = 0.0,
         max_tokens: int | None = None,
@@ -175,6 +176,43 @@ class _ReasoningAdapter:
             stop_reason="stop",
             model="vendor/model",
             request_id="gen_1",
+        )
+
+
+class _ReasoningReplayAdapter:
+    def __init__(self) -> None:
+        self.calls: list[list[AdapterMessage]] = []
+        self._responses = [_TOOL_CALL, _FINAL_REPORT]
+        self._cursor = 0
+        self.details: list[JsonValue] = [
+            {"type": "reasoning.encrypted", "data": "ciphertext", "id": "enc-1"},
+            {"type": "reasoning.text", "text": None, "id": "text-1"},
+            {
+                "type": "reasoning.server_tool_call",
+                "name": "search",
+                "arguments": {"query": "notes"},
+            },
+        ]
+
+    def complete(
+        self,
+        messages: Sequence[AdapterMessage],
+        *,
+        temperature: float = 0.0,
+        max_tokens: int | None = None,
+    ) -> AdapterResponse:
+        self.calls.append([dict(message) for message in messages])
+        text = self._responses[self._cursor]
+        self._cursor += 1
+        return AdapterResponse(
+            text=text,
+            reasoning=None,
+            assistant_metadata={"reasoning_details": self.details} if self._cursor == 1 else {},
+            prompt_tokens=10,
+            completion_tokens=5,
+            stop_reason="stop",
+            model="vendor/model",
+            request_id=f"gen_{self._cursor}",
         )
 
 
@@ -268,6 +306,23 @@ def test_model_reasoning_is_preserved_in_event_log(tmp_path: Path) -> None:
     assert outcome.status == "reported"
     [model_event] = _events_of_type(stack.log, EventType.MODEL_MESSAGE)
     assert model_event.payload["reasoning"] == "the counter is frozen while liveness advances"
+
+
+def test_structured_reasoning_is_replayed_exactly_on_next_cycle(tmp_path: Path) -> None:
+    stack = _Stack(tmp_path, [_TOOL_CALL, _FINAL_REPORT])
+    adapter = _ReasoningReplayAdapter()
+
+    outcome = stack.new_loop(adapter, max_cycles=2).run()
+
+    assert outcome.status == "reported"
+    assert adapter.calls[1][1] == {
+        "role": "assistant",
+        "content": _TOOL_CALL,
+        "reasoning_details": adapter.details,
+    }
+    assert adapter.calls[1][2] == {"role": "user", "content": repr("alpha\nbeta")}
+    first_model_event = _events_of_type(stack.log, EventType.MODEL_MESSAGE)[0]
+    assert first_model_event.payload["assistant_metadata"] == {"reasoning_details": adapter.details}
 
 
 def test_malformed_assistant_reply_precedes_nudge_in_next_request(tmp_path: Path) -> None:

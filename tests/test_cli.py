@@ -333,7 +333,7 @@ def test_unexpected_error_exits_three_with_traceback(
     importlib.util.find_spec("openai") is not None,
     reason="openai SDK installed; the missing-SDK lazy-import failure cannot be exercised",
 )
-def test_openai_without_sdk_reports_adapter_failed_and_exits_nonzero(
+def test_openai_without_sdk_preserves_completed_run_exit_zero(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     probe_dir = _make_probe(tmp_path)
@@ -352,7 +352,7 @@ def test_openai_without_sdk_reports_adapter_failed_and_exits_nonzero(
         ]
     )
 
-    assert exit_code == 4
+    assert exit_code == 0
     [run_dir] = list((out / "cli-probe").iterdir())
     payload: dict[str, Any] = json.loads((run_dir / "report.json").read_text(encoding="utf-8"))
     assert payload["model"] == "openai:gpt-test"
@@ -372,6 +372,35 @@ def test_run_labels_distinguish_sanitizer_collisions_and_bound_long_ids() -> Non
     assert collision_a.endswith("-fault-s0")
     assert very_long.endswith("-control-s17")
     assert len(very_long) <= 96
+    with pytest.raises(ValueError, match="seed"):
+        cli._run_label("stub", None, "fault", int("9" * 300))
+
+
+@pytest.mark.parametrize(
+    ("flag", "value", "error_text"),
+    [
+        ("--seed", "-1", "seed"),
+        ("--seed", "9" * 300, "seed"),
+        ("--max-cycles", "0", "max-cycles"),
+        ("--max-tokens", "0", "max-tokens"),
+        ("--context-tokens", "0", "context-tokens"),
+    ],
+)
+def test_invalid_numeric_input_is_rejected_before_output_reservation(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    flag: str,
+    value: str,
+    error_text: str,
+) -> None:
+    probe_dir = _make_probe(tmp_path)
+    out = tmp_path / "runs"
+
+    exit_code = cli.main(["run", str(probe_dir), flag, value, "--out", str(out)])
+
+    assert exit_code == 2
+    assert error_text in capsys.readouterr().err
+    assert not out.exists()
 
 
 def test_existing_run_directory_is_rejected_before_adapter_construction(

@@ -11,6 +11,7 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from awarebench.adapters.base import (
     AdapterError,
+    AdapterMessage,
     AdapterResponse,
     _normalize_stop_reason,
     _require_token,
@@ -88,21 +89,36 @@ def _reasoning_text(message: Mapping[str, Any]) -> str | None:
     for index, raw_detail in enumerate(details):
         detail = _mapping(raw_detail, f"message.reasoning_details[{index}]")
         detail_type = detail.get("type")
-        if detail_type == "reasoning.text":
-            value = detail.get("text")
-        elif detail_type == "reasoning.summary":
-            value = detail.get("summary")
-        elif detail_type == "reasoning.encrypted":
-            continue
-        else:
-            raise AdapterError("malformed openrouter response: unknown reasoning detail type")
-        if not isinstance(value, str):
-            raise AdapterError(
-                "malformed openrouter response: reasoning detail content must be a string"
-            )
-        if value:
+        value = (
+            detail.get("text")
+            if detail_type == "reasoning.text"
+            else detail.get("summary")
+            if detail_type == "reasoning.summary"
+            else None
+        )
+        if isinstance(value, str) and value:
             texts.append(value)
     return "\n".join(texts) or None
+
+
+def _assistant_metadata(message: Mapping[str, Any]) -> dict[str, Any]:
+    metadata: dict[str, Any] = {}
+    for key in ("reasoning", "reasoning_content"):
+        value = message.get(key)
+        if value is not None:
+            if not isinstance(value, str):
+                raise AdapterError(f"malformed openrouter response: message.{key} must be a string")
+            metadata[key] = value
+    if "reasoning_details" in message and message["reasoning_details"] is not None:
+        details = message["reasoning_details"]
+        if not isinstance(details, list):
+            raise AdapterError(
+                "malformed openrouter response: message.reasoning_details must be a list"
+            )
+        for index, detail in enumerate(details):
+            _mapping(detail, f"message.reasoning_details[{index}]")
+        metadata["reasoning_details"] = details
+    return metadata
 
 
 class OpenRouterAdapter:
@@ -133,7 +149,7 @@ class OpenRouterAdapter:
 
     def complete(
         self,
-        messages: Sequence[dict[str, str]],
+        messages: Sequence[AdapterMessage],
         *,
         temperature: float = 0.0,
         max_tokens: int | None = None,
@@ -209,6 +225,7 @@ class OpenRouterAdapter:
         return AdapterResponse(
             text=text,
             reasoning=reasoning,
+            assistant_metadata=_assistant_metadata(message),
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
             stop_reason=_normalize_stop_reason(finish_reason),

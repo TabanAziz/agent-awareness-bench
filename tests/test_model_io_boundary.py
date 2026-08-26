@@ -48,32 +48,49 @@ def _scan_source(source: str, filename: str = "candidate.py") -> list[str]:
             and ("http://" in node.value or "https://" in node.value)
         ):
             violations.append(f"{filename}:{node.lineno}: HTTP endpoint literal")
-        elif (
-            isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Attribute)
-            and isinstance(node.func.value, ast.Name)
-            and (node.func.value.id, node.func.attr) in {("os", "system"), ("os", "popen")}
-        ):
-            violations.append(
-                f"{filename}:{node.lineno}: process transport {node.func.value.id}.{node.func.attr}"
-            )
-        elif (
-            isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Attribute)
-            and node.func.attr == "complete"
-            and not filename.replace("\\", "/").endswith("/harness/loop.py")
-        ):
-            violations.append(f"{filename}:{node.lineno}: adapter completion outside AgentLoop")
+        elif isinstance(node, ast.Call):
+            func = node.func
+            if (
+                isinstance(func, ast.Attribute)
+                and isinstance(func.value, ast.Name)
+                and (func.value.id, func.attr) in {("os", "system"), ("os", "popen")}
+            ):
+                violations.append(
+                    f"{filename}:{node.lineno}: process transport {func.value.id}.{func.attr}"
+                )
+            elif (
+                isinstance(func, ast.Attribute)
+                and func.attr == "complete"
+                and not filename.replace("\\", "/").endswith("/harness/loop.py")
+            ):
+                violations.append(f"{filename}:{node.lineno}: adapter completion outside AgentLoop")
+            elif (isinstance(func, ast.Name) and func.id == "__import__") or (
+                isinstance(func, ast.Attribute) and func.attr == "import_module"
+            ):
+                violations.append(f"{filename}:{node.lineno}: dynamic import")
+            elif (
+                isinstance(func, ast.Name)
+                and func.id == "getattr"
+                and len(node.args) >= 2
+                and isinstance(node.args[1], ast.Constant)
+                and node.args[1].value == "complete"
+            ):
+                violations.append(f"{filename}:{node.lineno}: dynamic adapter completion")
     return violations
+
+
+def _is_adapter_file(path: Path) -> bool:
+    return path.is_relative_to(Path("src/awarebench/adapters"))
 
 
 def _production_python_files() -> list[Path]:
     paths = [
         *Path("src").rglob("*.py"),
         *Path("tools").rglob("*.py"),
+        *Path("probes").rglob("*.py"),
         *Path(".").glob("*.py"),
     ]
-    return sorted(path for path in paths if "adapters" not in path.parts)
+    return sorted(path for path in paths if not _is_adapter_file(path))
 
 
 def test_only_adapters_import_http_clients_or_embed_http_endpoints() -> None:
@@ -95,9 +112,19 @@ def test_only_adapters_import_http_clients_or_embed_http_endpoints() -> None:
         "import socket\n",
         "from os import system\nsystem('curl example.invalid')\n",
         "import os\nos.system('curl https' + '://example.invalid')\n",
+        '__import__("urllib.request", fromlist=["urlopen"]).urlopen("x")\n',
+        'import importlib\nimportlib.import_module("urllib" + ".request")\n',
         "endpoint = 'https://example.invalid/model'\n",
         "from awarebench.adapters import OpenRouterAdapter\nadapter.complete([])\n",
+        'getattr(adapter, "complete")([])\n',
     ],
 )
 def test_boundary_scanner_rejects_known_bypass_shapes(source: str) -> None:
     assert _scan_source(source)
+
+
+def test_only_the_exact_adapter_package_is_exempt() -> None:
+    assert _is_adapter_file(Path("src/awarebench/adapters/openrouter.py"))
+    assert not _is_adapter_file(Path("tools/adapters/rogue_runner.py"))
+    source = "import urllib.request\nENDPOINT = 'https://evil.example/model'\n"
+    assert _scan_source(source, "tools/adapters/rogue_runner.py")

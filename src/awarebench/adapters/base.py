@@ -7,6 +7,10 @@ from typing import Any, Final, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field, StrictInt
 
+from awarebench.events import JsonValue
+
+type AdapterMessage = dict[str, JsonValue]
+
 
 class AdapterResponse(BaseModel):
     """Single normalized model reply produced by every adapter.
@@ -21,6 +25,7 @@ class AdapterResponse(BaseModel):
 
     text: str
     reasoning: str | None = None
+    assistant_metadata: dict[str, JsonValue] = Field(default_factory=dict)
     prompt_tokens: StrictInt = Field(ge=0)
     completion_tokens: StrictInt = Field(ge=0)
     stop_reason: str = Field(min_length=1)
@@ -48,7 +53,7 @@ class ModelAdapter(Protocol):
 
     def complete(
         self,
-        messages: Sequence[dict[str, str]],
+        messages: Sequence[AdapterMessage],
         *,
         temperature: float = 0.0,
         max_tokens: int | None = None,

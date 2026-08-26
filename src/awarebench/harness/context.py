@@ -10,11 +10,12 @@ probe class C scenarios depend on it.
 
 from __future__ import annotations
 
+import copy
 from collections.abc import Callable, Sequence
 
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, field_validator
 
-from awarebench.events import EventLog, EventType
+from awarebench.events import EventLog, EventType, JsonValue
 from awarebench.harness._validation import (
     require_strict_non_negative_int,
     require_strict_positive_int,
@@ -35,6 +36,7 @@ class Message(BaseModel):
     seq: StrictInt = Field(ge=0)
     role: str
     content: str
+    metadata: dict[str, JsonValue] = Field(default_factory=dict)
 
     @field_validator("role")
     @classmethod
@@ -42,6 +44,16 @@ class Message(BaseModel):
         """Reject empty roles; they carry no protocol meaning."""
         if not value:
             raise ValueError("role must be non-empty")
+        return value
+
+    @field_validator("metadata")
+    @classmethod
+    def _metadata_must_not_replace_core_fields(
+        cls, value: dict[str, JsonValue]
+    ) -> dict[str, JsonValue]:
+        overlap = {"role", "content"}.intersection(value)
+        if overlap:
+            raise ValueError(f"metadata cannot replace core fields: {sorted(overlap)}")
         return value
 
 
@@ -148,7 +160,12 @@ class ContextWindow:
         self._compaction_count = 0
         self._next_seq = 0
 
-    def add(self, role: str, content: str) -> Message:
+    def add(
+        self,
+        role: str,
+        content: str,
+        metadata: dict[str, JsonValue] | None = None,
+    ) -> Message:
         """Add a message, compacting silently when the window overflows."""
         if not isinstance(role, str) or not role:
             raise ValueError(f"role must be a non-empty str, got {role!r}")
@@ -194,7 +211,12 @@ class ContextWindow:
             self._compaction_count += 1
         self._messages = working
         self._used_tokens = used
-        message = Message(seq=self._next_seq, role=role, content=content)
+        message = Message(
+            seq=self._next_seq,
+            role=role,
+            content=content,
+            metadata={} if metadata is None else metadata,
+        )
         self._next_seq += 1
         self._messages.append(message)
         self._used_tokens += incoming
@@ -207,6 +229,18 @@ class ContextWindow:
     def transcript(self) -> tuple[tuple[str, str], ...]:
         """Agent-safe view: (role, content) pairs without scoring-side seqs."""
         return tuple((message.role, message.content) for message in self._messages)
+
+    def wire_transcript(self) -> tuple[dict[str, JsonValue], ...]:
+        """Agent-safe wire messages, including replay metadata but no scoring seqs."""
+        result: list[dict[str, JsonValue]] = []
+        for message in self._messages:
+            wire_message: dict[str, JsonValue] = {
+                "role": message.role,
+                "content": message.content,
+            }
+            wire_message.update(copy.deepcopy(message.metadata))
+            result.append(wire_message)
+        return tuple(result)
 
     @property
     def used_tokens(self) -> int:

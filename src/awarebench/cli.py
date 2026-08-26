@@ -2,7 +2,7 @@
 
 Exit codes: 0 for a completed harness run, 2 when the probe loader rejects the
 manifest (ProbeGateError), usage is invalid, or the target run already exists;
-3 for unexpected exceptions (traceback on stderr); 4 for adapter failure.
+3 for unexpected exceptions (traceback on stderr).
 """
 
 from __future__ import annotations
@@ -37,6 +37,7 @@ from awarebench.scoring.evaluate import evaluate
 from awarebench.scoring.evaluate import passed as all_predicates_pass
 
 DEFAULT_CONTEXT_TOKENS: Final[int] = 16_384
+MAX_SEED: Final[int] = (1 << 63) - 1
 
 # Repeated forever when no stub script is given: every turn is malformed, so
 # a scriptless stub run deterministically exhausts its cycles.
@@ -147,6 +148,11 @@ def _build_stack(
 
 def _run_command(args: argparse.Namespace) -> int:
     try:
+        _validate_run_numbers(args)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    try:
         backend, model_id = _parse_model_spec(args.model, args.model_name)
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
@@ -232,7 +238,7 @@ def _run_command(args: argparse.Namespace) -> int:
         f"tokens={snapshot['prompt_tokens']}+{snapshot['completion_tokens']} "
         f"passed={all_predicates_pass(score)}"
     )
-    return 4 if outcome.status == "adapter_failed" else 0
+    return 0
 
 
 def _parse_model_spec(model: str, model_name: str | None) -> tuple[str, str | None]:
@@ -274,6 +280,7 @@ def _build_adapter(
 
 def _run_label(backend: str, model_id: str | None, variant: str, seed: int) -> str:
     """Return a bounded, collision-resistant path component for one run."""
+    _require_seed(seed)
     if backend == "stub" and model_id is None:
         return f"stub-{variant}-s{seed}"
     model_spec = backend if model_id is None else f"{backend}:{model_id}"
@@ -282,6 +289,23 @@ def _run_label(backend: str, model_id: str | None, variant: str, seed: int) -> s
     prefix = safe_model[:48].rstrip("-.") or "model"
     digest = hashlib.sha256(model_spec.encode("utf-8")).hexdigest()[:12]
     return f"{prefix}-{digest}-{variant}-s{seed}"
+
+
+def _require_seed(seed: int) -> None:
+    if isinstance(seed, bool) or not isinstance(seed, int) or not 0 <= seed <= MAX_SEED:
+        raise ValueError(f"seed must be between 0 and {MAX_SEED}")
+
+
+def _validate_run_numbers(args: argparse.Namespace) -> None:
+    _require_seed(args.seed)
+    for field, option in (
+        ("max_cycles", "max-cycles"),
+        ("max_tokens", "max-tokens"),
+        ("context_tokens", "context-tokens"),
+    ):
+        value = getattr(args, field)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise ValueError(f"{option} must be >= 1")
 
 
 def _read_stub_script(path: Path | None) -> list[str]:

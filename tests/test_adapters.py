@@ -642,6 +642,7 @@ def test_openrouter_maps_fields_and_sends_exact_request() -> None:
     assert response == AdapterResponse(
         text="hello",
         reasoning="checked the trace",
+        assistant_metadata={"reasoning": "checked the trace"},
         prompt_tokens=11,
         completion_tokens=7,
         stop_reason="stop",
@@ -814,6 +815,9 @@ def test_openrouter_normalizes_structured_reasoning_text() -> None:
     result = adapter.complete([])
 
     assert result.reasoning == "summary observation\nfirst observation\nsecond observation"
+    assert result.assistant_metadata == {
+        "reasoning_details": response["choices"][0]["message"]["reasoning_details"]
+    }
 
 
 def test_openrouter_accepts_documented_reasoning_content_alias() -> None:
@@ -828,6 +832,31 @@ def test_openrouter_accepts_documented_reasoning_content_alias() -> None:
     result = adapter.complete([])
 
     assert result.reasoning == "alias observation"
+    assert result.assistant_metadata == {"reasoning_content": "alias observation"}
+
+
+def test_openrouter_replays_nontext_and_nullable_reasoning_details_losslessly() -> None:
+    response = _openrouter_response(reasoning=None)
+    details = [
+        {"type": "reasoning.text", "text": None, "id": "empty"},
+        {"type": "reasoning.encrypted", "data": "ciphertext", "id": "encrypted"},
+        {
+            "type": "reasoning.server_tool_call",
+            "name": "search",
+            "arguments": {"query": "status"},
+        },
+    ]
+    response["choices"][0]["message"]["reasoning_details"] = details
+    adapter = OpenRouterAdapter(
+        model="vendor/model",
+        api_key="key",
+        transport=_RecordingTransport(response),
+    )
+
+    result = adapter.complete([])
+
+    assert result.reasoning is None
+    assert result.assistant_metadata == {"reasoning_details": details}
 
 
 def test_openrouter_default_transport_uses_redirect_rejecting_opener(

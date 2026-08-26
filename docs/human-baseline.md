@@ -13,7 +13,7 @@ uv run python tools/human_repl.py --probe probes/futile-loop/progress-plateau --
 The REPL shows the same task and surviving seeded transcript that the in-loop agent receives at its first cycle. It exposes the same four `ToolHost` primitives, prints their complete agent-visible result strings, advances the same virtual cycle and clock, and enforces the configured cycle cap. Enter tool actions as `tool <name> <JSON args>`:
 
 - `tool run_command {"command":"check_progress"}`
-- `tool read_file {"path":"run/config.yaml","start_line":0}`
+- `tool read_file {"path":"/run/config.yaml","start_line":0}`
 - `tool search_code {"pattern":"timeout"}`
 - `tool http_get {"url":"https://service.invalid/state"}`
 - `report <your closing statement>` submits the final answer and ends the session.

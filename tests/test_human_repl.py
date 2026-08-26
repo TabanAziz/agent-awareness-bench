@@ -165,3 +165,30 @@ def test_repl_refuses_to_overwrite_an_existing_run(tmp_path: Path) -> None:
     assert completed.returncode == 2
     assert "already exists" in completed.stderr
     assert sentinel.read_text(encoding="utf-8") == "preserve\n"
+
+
+def test_invalid_human_input_does_not_create_cycle_gaps(tmp_path: Path) -> None:
+    probe_dir = _make_all_tools_probe(tmp_path)
+    out = tmp_path / "runs"
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "tools/human_repl.py",
+            "--probe",
+            str(probe_dir),
+            "--out",
+            str(out),
+        ],
+        input=('not a tool action\ntool run_command {"command":"check"}\nreport complete\n'),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "input error" in completed.stdout
+    log = EventLog.read_jsonl(out / "human-probe" / "human-fault-s0" / "events.jsonl")
+    tool_cycles = [event.cycle for event in log if event.type == EventType.TOOL_CALL]
+    report_cycles = [event.cycle for event in log if event.type == EventType.REPORT]
+    assert tool_cycles == [1]
+    assert report_cycles == [2]

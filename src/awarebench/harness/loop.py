@@ -43,7 +43,7 @@ from typing import Any, Final, Literal
 
 from pydantic import BaseModel, ConfigDict
 
-from awarebench.adapters.base import AdapterError, ModelAdapter
+from awarebench.adapters.base import AdapterError, AdapterMessage, ModelAdapter
 from awarebench.events import EventLog, EventType
 from awarebench.harness._validation import require_strict_positive_int
 from awarebench.harness.budget import BudgetAccountant
@@ -167,6 +167,8 @@ class AgentLoop:
             }
             if response.reasoning is not None:
                 model_payload["reasoning"] = response.reasoning
+            if response.assistant_metadata:
+                model_payload["assistant_metadata"] = response.assistant_metadata
             self._log.append(
                 EventType.MODEL_MESSAGE,
                 self._cycles.current,
@@ -178,7 +180,9 @@ class AgentLoop:
             action = _parse_action(response.text)
             if action is None:
                 try:
-                    self._context.add("assistant", response.text)
+                    self._context.add(
+                        "assistant", response.text, metadata=response.assistant_metadata
+                    )
                     self._context.add("user", NUDGE_TEXT)
                 except ValueError:
                     return self._overflow(cycles_used)
@@ -196,7 +200,7 @@ class AgentLoop:
                 )
 
             try:
-                self._context.add("assistant", response.text)
+                self._context.add("assistant", response.text, metadata=response.assistant_metadata)
             except ValueError:
                 return self._overflow(cycles_used)
             result_repr = execute_tool_action(self._host, action)
@@ -211,13 +215,11 @@ class AgentLoop:
         """Terminal outcome when the window cannot hold the next transcript message."""
         return LoopOutcome(status="context_overflow", report_text=None, cycles_used=cycles_used)
 
-    def _build_messages(self) -> list[dict[str, str]]:
+    def _build_messages(self) -> list[AdapterMessage]:
         """System message (task + protocol) followed by the context transcript."""
         system_content = f"{self._probe.manifest.task}\n\n{_PROTOCOL_INSTRUCTIONS}"
-        messages = [{"role": "system", "content": system_content}]
-        messages.extend(
-            {"role": role, "content": content} for role, content in self._context.transcript()
-        )
+        messages: list[AdapterMessage] = [{"role": "system", "content": system_content}]
+        messages.extend(self._context.wire_transcript())
         return messages
 
 
