@@ -192,3 +192,30 @@ def test_invalid_human_input_does_not_create_cycle_gaps(tmp_path: Path) -> None:
     report_cycles = [event.cycle for event in log if event.type == EventType.REPORT]
     assert tool_cycles == [1]
     assert report_cycles == [2]
+
+
+def test_oversized_human_action_does_not_create_cycle_gap(tmp_path: Path) -> None:
+    probe_dir = _make_all_tools_probe(tmp_path)
+    out = tmp_path / "runs"
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "tools/human_repl.py",
+            "--probe",
+            str(probe_dir),
+            "--context-tokens",
+            "4",
+            "--out",
+            str(out),
+        ],
+        input=('tool run_command {"command":"' + "x" * 100 + '"}\nreport complete\n'),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "context error" in completed.stdout
+    log = EventLog.read_jsonl(out / "human-probe" / "human-fault-s0" / "events.jsonl")
+    report_cycles = [event.cycle for event in log if event.type == EventType.REPORT]
+    assert report_cycles == [1]

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Sequence
 from typing import Any, Final, Protocol, runtime_checkable
 
@@ -10,6 +11,20 @@ from pydantic import BaseModel, ConfigDict, Field, StrictInt
 from awarebench.events import JsonValue
 
 type AdapterMessage = dict[str, JsonValue]
+
+
+def message_token_text(content: str, metadata: dict[str, JsonValue]) -> str:
+    """Return deterministic text charged for content plus replay-only metadata."""
+    if not metadata:
+        return content
+    serialized = json.dumps(
+        metadata,
+        allow_nan=False,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return content + serialized
 
 
 class AdapterResponse(BaseModel):
@@ -46,9 +61,10 @@ class ModelAdapter(Protocol):
     """Anything that can run one chat completion over plain message dicts.
 
     Message lists follow the OpenAI style: {"role": ..., "content": ...} dicts
-    where role may be "system". Each adapter translates this common shape into
-    its vendor wire format (for example, the Anthropic adapter lifts system
-    messages to the top-level system parameter).
+    where role may be "system" and assistant messages may carry replay
+    metadata. Each adapter translates this common shape into its vendor wire
+    format (for example, the Anthropic adapter lifts system messages to the
+    top-level system parameter).
     """
 
     def complete(

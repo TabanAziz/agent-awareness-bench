@@ -10,7 +10,7 @@ from typing import Any, Final
 
 import yaml
 
-from awarebench.adapters import AdapterError, AdapterResponse, StubAdapter
+from awarebench.adapters import AdapterError, AdapterResponse, OpenRouterAdapter, StubAdapter
 from awarebench.adapters.base import AdapterMessage
 from awarebench.events import EventLog, EventType, JsonValue
 from awarebench.harness.budget import BudgetAccountant
@@ -216,6 +216,34 @@ class _ReasoningReplayAdapter:
         )
 
 
+class _OpenRouterSequenceTransport:
+    def __init__(self, responses: list[dict[str, Any]]) -> None:
+        self._responses = responses
+        self.calls: list[dict[str, Any]] = []
+
+    def __call__(self, request: Any, timeout: float) -> bytes:
+        del timeout
+        assert isinstance(request.data, bytes)
+        self.calls.append(json.loads(request.data.decode("utf-8")))
+        return json.dumps(self._responses[len(self.calls) - 1]).encode("utf-8")
+
+
+def _openrouter_loop_response(text: str, request_id: str) -> dict[str, Any]:
+    return {
+        "choices": [
+            {
+                "index": 0,
+                "message": {"role": "assistant", "content": text},
+                "finish_reason": "stop",
+            }
+        ],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+        "object": "chat.completion",
+        "model": "vendor/model",
+        "id": request_id,
+    }
+
+
 def _events_of_type(log: EventLog, event_type: str) -> list[Any]:
     return [event for event in log if event.type == event_type]
 
@@ -323,6 +351,53 @@ def test_structured_reasoning_is_replayed_exactly_on_next_cycle(tmp_path: Path) 
     assert adapter.calls[1][2] == {"role": "user", "content": repr("alpha\nbeta")}
     first_model_event = _events_of_type(stack.log, EventType.MODEL_MESSAGE)[0]
     assert first_model_event.payload["assistant_metadata"] == {"reasoning_details": adapter.details}
+
+
+def test_openrouter_wire_replays_exact_reasoning_details_on_next_cycle(tmp_path: Path) -> None:
+    details: list[JsonValue] = [
+        {"type": "reasoning.encrypted", "data": "ciphertext", "id": "enc-1"},
+        {"type": "reasoning.text", "text": None, "id": "text-1"},
+        {
+            "type": "reasoning.server_tool_call",
+            "name": "search",
+            "arguments": {"query": "notes"},
+        },
+    ]
+    first = _openrouter_loop_response(_TOOL_CALL, "gen_1")
+    first["choices"][0]["message"]["reasoning_details"] = details
+    transport = _OpenRouterSequenceTransport(
+        [first, _openrouter_loop_response(_FINAL_REPORT, "gen_2")]
+    )
+    adapter = OpenRouterAdapter(model="vendor/model", api_key="key", transport=transport)
+    stack = _Stack(tmp_path, [_TOOL_CALL, _FINAL_REPORT])
+
+    outcome = stack.new_loop(adapter, max_cycles=2).run()
+
+    assert outcome.status == "reported"
+    assert transport.calls[1]["messages"][1] == {
+        "role": "assistant",
+        "content": _TOOL_CALL,
+        "reasoning_details": details,
+    }
+
+
+def test_non_finite_openrouter_response_becomes_logged_adapter_failure(tmp_path: Path) -> None:
+    malformed = _openrouter_loop_response(_FINAL_REPORT, "gen_bad")
+    malformed["choices"][0]["message"]["reasoning_details"] = [
+        {"type": "reasoning.encrypted", "data": float("nan")}
+    ]
+    adapter = OpenRouterAdapter(
+        model="vendor/model",
+        api_key="key",
+        transport=_OpenRouterSequenceTransport([malformed]),
+    )
+    stack = _Stack(tmp_path, [_FINAL_REPORT])
+
+    outcome = stack.new_loop(adapter, max_cycles=1).run()
+
+    assert outcome.status == "adapter_failed"
+    [model_event] = _events_of_type(stack.log, EventType.MODEL_MESSAGE)
+    assert model_event.payload == {"error": "openrouter response was not valid JSON"}
 
 
 def test_malformed_assistant_reply_precedes_nudge_in_next_request(tmp_path: Path) -> None:

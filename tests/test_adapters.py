@@ -25,6 +25,7 @@ from awarebench.adapters import (
     OpenRouterAdapter,
     StubAdapter,
 )
+from awarebench.events import JsonValue
 
 
 class _RecordingEndpoint:
@@ -162,6 +163,19 @@ def test_stub_usage_uses_documented_len_over_four_approximation() -> None:
 
     assert response.prompt_tokens == 2  # (8 + 2) // 4
     assert response.completion_tokens == 2
+
+
+def test_stub_prompt_usage_includes_replayed_assistant_metadata() -> None:
+    adapter = StubAdapter(["done"])
+    metadata: dict[str, JsonValue] = {
+        "reasoning_details": [{"type": "reasoning.encrypted", "data": "x" * 16}]
+    }
+
+    response = adapter.complete([{"role": "assistant", "content": "ok", **metadata}])
+
+    from awarebench.adapters.base import message_token_text
+
+    assert response.prompt_tokens == len(message_token_text("ok", metadata)) // 4
 
 
 def test_stub_ignores_temperature_for_determinism() -> None:
@@ -732,6 +746,41 @@ def test_openrouter_rejects_invalid_json() -> None:
 
     with pytest.raises(AdapterError, match="JSON"):
         adapter.complete([])
+
+
+@pytest.mark.parametrize("constant", ["NaN", "Infinity", "-Infinity"])
+def test_openrouter_rejects_non_finite_json_constants(constant: str) -> None:
+    raw = _openrouter_response(reasoning=None)
+    raw["choices"][0]["message"]["reasoning_details"] = [
+        {"type": "reasoning.encrypted", "data": "PLACEHOLDER"}
+    ]
+    encoded = json.dumps(raw).replace('"PLACEHOLDER"', constant).encode("utf-8")
+    adapter = OpenRouterAdapter(
+        model="vendor/model",
+        api_key="key",
+        transport=_RecordingTransport(encoded),
+    )
+
+    with pytest.raises(AdapterError, match="JSON"):
+        adapter.complete([])
+
+
+def test_openrouter_rejects_non_finite_request_metadata_before_transport() -> None:
+    transport = _RecordingTransport(_openrouter_response())
+    adapter = OpenRouterAdapter(model="vendor/model", api_key="key", transport=transport)
+
+    with pytest.raises(AdapterError, match="JSON"):
+        adapter.complete(
+            [
+                {
+                    "role": "assistant",
+                    "content": "prior",
+                    "reasoning_details": [{"data": float("nan")}],
+                }
+            ]
+        )
+
+    assert transport.calls == []
 
 
 @pytest.mark.parametrize(

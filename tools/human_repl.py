@@ -140,8 +140,10 @@ def main() -> int:
 
         try:
             action = _parse_tool_input(user_input)
+            context.validate_add("assistant", user_input)
         except ValueError as exc:
-            print(f"input error: {exc}")
+            label = "context error" if "window" in str(exc) else "input error"
+            print(f"{label}: {exc}")
             continue
 
         cycles.advance()

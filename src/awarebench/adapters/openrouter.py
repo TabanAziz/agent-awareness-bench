@@ -24,6 +24,10 @@ MAX_RESPONSE_BYTES: Final[int] = 8 * 1024 * 1024
 Transport = Callable[[Request, float], bytes]
 
 
+def _reject_json_constant(value: str) -> None:
+    raise ValueError(f"non-finite JSON constant: {value}")
+
+
 class _RejectRedirects(HTTPRedirectHandler):
     """Keep bearer credentials on the one configured OpenRouter origin."""
 
@@ -162,9 +166,13 @@ class OpenRouterAdapter:
         }
         if max_tokens is not None:
             body["max_tokens"] = max_tokens
+        try:
+            request_data = json.dumps(body, allow_nan=False).encode("utf-8")
+        except (TypeError, ValueError) as exc:
+            raise AdapterError("openrouter request was not valid JSON") from exc
         request = Request(
             OPENROUTER_ENDPOINT,
-            data=json.dumps(body).encode("utf-8"),
+            data=request_data,
             headers={
                 "Authorization": f"Bearer {self._resolve_api_key()}",
                 "Content-Type": "application/json",
@@ -178,8 +186,11 @@ class OpenRouterAdapter:
         except Exception as exc:
             raise AdapterError(f"openrouter request failed: {type(exc).__name__}") from exc
         try:
-            payload = json.loads(raw_response.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            payload = json.loads(
+                raw_response.decode("utf-8"),
+                parse_constant=_reject_json_constant,
+            )
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
             raise AdapterError("openrouter response was not valid JSON") from exc
         return self._map_response(payload)
 

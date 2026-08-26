@@ -28,6 +28,22 @@ def _is_forbidden_module(module: str) -> bool:
 def _scan_source(source: str, filename: str = "candidate.py") -> list[str]:
     violations: list[str] = []
     tree = ast.parse(source, filename=filename)
+    dynamic_import_names = {"__import__"}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module in {"builtins", "importlib"}:
+            for alias in node.names:
+                if alias.name in {"__import__", "import_module"}:
+                    dynamic_import_names.add(alias.asname or alias.name)
+
+    def literal_string(node: ast.AST) -> str | None:
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return node.value
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+            left = literal_string(node.left)
+            right = literal_string(node.right)
+            return left + right if left is not None and right is not None else None
+        return None
+
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
@@ -64,18 +80,25 @@ def _scan_source(source: str, filename: str = "candidate.py") -> list[str]:
                 and not filename.replace("\\", "/").endswith("/harness/loop.py")
             ):
                 violations.append(f"{filename}:{node.lineno}: adapter completion outside AgentLoop")
-            elif (isinstance(func, ast.Name) and func.id == "__import__") or (
-                isinstance(func, ast.Attribute) and func.attr == "import_module"
+            elif (isinstance(func, ast.Name) and func.id in dynamic_import_names) or (
+                isinstance(func, ast.Attribute) and func.attr in {"__import__", "import_module"}
             ):
                 violations.append(f"{filename}:{node.lineno}: dynamic import")
             elif (
                 isinstance(func, ast.Name)
                 and func.id == "getattr"
                 and len(node.args) >= 2
-                and isinstance(node.args[1], ast.Constant)
-                and node.args[1].value == "complete"
+                and literal_string(node.args[1]) == "complete"
             ):
                 violations.append(f"{filename}:{node.lineno}: dynamic adapter completion")
+        elif (
+            isinstance(node, ast.Attribute)
+            and node.attr == "complete"
+            and not filename.replace("\\", "/").endswith("/harness/loop.py")
+        ):
+            violations.append(
+                f"{filename}:{node.lineno}: adapter completion reference outside AgentLoop"
+            )
     return violations
 
 
@@ -114,9 +137,13 @@ def test_only_adapters_import_http_clients_or_embed_http_endpoints() -> None:
         "import os\nos.system('curl https' + '://example.invalid')\n",
         '__import__("urllib.request", fromlist=["urlopen"]).urlopen("x")\n',
         'import importlib\nimportlib.import_module("urllib" + ".request")\n',
+        'from importlib import import_module as load\nload("urllib" + ".request")\n',
+        'import builtins\nbuiltins.__import__("urllib" + ".request", fromlist=["urlopen"])\n',
         "endpoint = 'https://example.invalid/model'\n",
         "from awarebench.adapters import OpenRouterAdapter\nadapter.complete([])\n",
+        "call = adapter.complete\ncall([])\n",
         'getattr(adapter, "complete")([])\n',
+        'getattr(adapter, "com" + "plete")([])\n',
     ],
 )
 def test_boundary_scanner_rejects_known_bypass_shapes(source: str) -> None:
