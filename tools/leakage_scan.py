@@ -15,6 +15,7 @@ import yaml
 from awarebench.cli import _build_stack
 from awarebench.events import EventLog
 from awarebench.harness.clock import CycleCounter, VirtualClock
+from awarebench.harness.loop import DEFAULT_CYCLE_STEP_US
 from awarebench.probes.loader import ProbeGateError, load_probe
 
 SEEDS: Final[tuple[int, ...]] = (0, 1, 2)
@@ -256,6 +257,7 @@ def _scan_environment(
             break
         command, handler = handlers[cycle_index % len(handlers)]
         cycles.advance()
+        clock.advance_us(DEFAULT_CYCLE_STEP_US)
         try:
             _exit_code, output = handler(command)
         except Exception as exc:

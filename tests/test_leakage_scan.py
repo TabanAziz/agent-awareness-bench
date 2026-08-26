@@ -11,6 +11,8 @@ from unittest.mock import patch
 import pytest
 import yaml
 
+from awarebench.harness.loop import DEFAULT_CYCLE_STEP_US
+
 
 def _load_scanner() -> Any:
     path = Path(__file__).parents[1] / "tools" / "leakage_scan.py"
@@ -40,6 +42,8 @@ def _write_probe(
     source_literal: str | None = None,
     with_runtime_surfaces: bool = True,
     cross_handler_leak: bool = False,
+    clock_threshold_leak: bool = False,
+    assert_clock_cycle_alignment: bool = False,
 ) -> Path:
     root = tmp_path / "probes" / "futile-loop" / "scanner-probe"
     root.mkdir(parents=True)
@@ -102,6 +106,16 @@ def _write_probe(
             applier += (
                 f"        if state['calls'] == {delayed_command_call}:\n"
                 f"            parts.fs.write('changed.txt', {post_handler_expression})\n"
+            )
+        if clock_threshold_leak:
+            applier += (
+                f"        if parts.clock.now_us >= {DEFAULT_CYCLE_STEP_US}:\n"
+                f"            return 0, {_encoded_expression('benchmark')}\n"
+            )
+        if assert_clock_cycle_alignment:
+            applier += (
+                f"        if parts.cycles.current != state['calls'] or parts.clock.now_us != state['calls'] * {DEFAULT_CYCLE_STEP_US}:\n"
+                f"            return 0, {_encoded_expression('benchmark')}\n"
             )
         applier += "        return 0, output\n    parts.command_handlers['status'] = status\n"
     if seed_message is not None:
@@ -237,6 +251,24 @@ def test_round_robin_scheduler_rescans_handlers_after_shared_state_changes(
     assert scanner.main([str(probes_root)]) == 1
 
     assert "command=a_read" in capsys.readouterr().err
+
+
+def test_clock_threshold_leak_is_visible_on_the_first_scheduled_cycle(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    scanner = _load_scanner()
+    probes_root = _write_probe(tmp_path, clock_threshold_leak=True).parents[1]
+
+    assert scanner.main([str(probes_root)]) == 1
+
+    assert "command=status" in capsys.readouterr().err
+
+
+def test_scheduler_keeps_cycle_and_clock_aligned_through_forty_steps(tmp_path: Path) -> None:
+    scanner = _load_scanner()
+    probes_root = _write_probe(tmp_path, assert_clock_cycle_alignment=True).parents[1]
+
+    assert scanner.main([str(probes_root)]) == 0
 
 
 def test_python_source_literals_remain_scanned(
