@@ -250,20 +250,24 @@ def _scan_environment(
 
     scan_virtual_files("initial")
 
-    for command, handler in sorted(parts.command_handlers.items()):
-        for output_index in range(HANDLER_OUTPUT_SAMPLES):
-            try:
-                _exit_code, output = handler(command)
-            except Exception as exc:
-                raise ScanError(
-                    f"cannot inspect command output for {probe_dir} "
-                    f"({variant}, seed {seed}, {command}, output {output_index + 1}): {exc}"
-                ) from exc
-            result.command_outputs_inspected += 1
-            surfaces_inspected += 1
-            result.leaks.extend(_check_text(output, f"{source} command={command}", patterns))
-            result.virtual_state_rescans += 1
-            scan_virtual_files(f"after-command={command} output={output_index + 1}")
+    handlers = sorted(parts.command_handlers.items())
+    for cycle_index in range(HANDLER_OUTPUT_SAMPLES):
+        if not handlers:
+            break
+        command, handler = handlers[cycle_index % len(handlers)]
+        cycles.advance()
+        try:
+            _exit_code, output = handler(command)
+        except Exception as exc:
+            raise ScanError(
+                f"cannot inspect command output for {probe_dir} "
+                f"({variant}, seed {seed}, cycle {cycle_index + 1}, {command}): {exc}"
+            ) from exc
+        result.command_outputs_inspected += 1
+        surfaces_inspected += 1
+        result.leaks.extend(_check_text(output, f"{source} command={command}", patterns))
+        result.virtual_state_rescans += 1
+        scan_virtual_files(f"after-cycle={cycle_index + 1} command={command}")
 
     if surfaces_inspected == 0:
         raise ScanError(f"{probe_dir} ({variant}, seed {seed}) exposed zero agent-visible surfaces")

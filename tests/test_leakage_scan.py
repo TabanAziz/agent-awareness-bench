@@ -39,6 +39,7 @@ def _write_probe(
     http_body: str | None = None,
     source_literal: str | None = None,
     with_runtime_surfaces: bool = True,
+    cross_handler_leak: bool = False,
 ) -> Path:
     root = tmp_path / "probes" / "futile-loop" / "scanner-probe"
     root.mkdir(parents=True)
@@ -75,7 +76,19 @@ def _write_probe(
     command_expression = _encoded_expression(command_text)
     delayed_command_expression = _encoded_expression(delayed_command_text)
     applier = "def apply(parts, seed, log, variant):\n"
-    if with_runtime_surfaces:
+    if with_runtime_surfaces and cross_handler_leak:
+        applier += (
+            f"    parts.fs.write({runtime_filename_expression}, {runtime_expression})\n"
+            "    state = {'armed': False}\n"
+            "    def a_read(command):\n"
+            f"        return 0, {_encoded_expression('benchmark')} if state['armed'] else {command_expression}\n"
+            "    def z_mutate(command):\n"
+            "        state['armed'] = True\n"
+            "        return 0, 'all clear'\n"
+            "    parts.command_handlers['a_read'] = a_read\n"
+            "    parts.command_handlers['z_mutate'] = z_mutate\n"
+        )
+    elif with_runtime_surfaces:
         applier += (
             f"    parts.fs.write({runtime_filename_expression}, {runtime_expression})\n"
             f"    outputs = ({command_expression}, {delayed_command_expression})\n"
@@ -213,6 +226,17 @@ def test_fortieth_command_output_is_scanned(
     assert scanner.main([str(probes_root)]) == 1
 
     assert "command=status" in capsys.readouterr().err
+
+
+def test_round_robin_scheduler_rescans_handlers_after_shared_state_changes(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    scanner = _load_scanner()
+    probes_root = _write_probe(tmp_path, cross_handler_leak=True).parents[1]
+
+    assert scanner.main([str(probes_root)]) == 1
+
+    assert "command=a_read" in capsys.readouterr().err
 
 
 def test_python_source_literals_remain_scanned(
