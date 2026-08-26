@@ -375,6 +375,21 @@ def _solvability_command(args: argparse.Namespace) -> int:
         cold_adapter = _build_judge_adapter(args.cold_model)
         judges = tuple(NamedJudge(model, _build_judge_adapter(model)) for model in args.judge_model)
         loaded = load_probe(args.probe_dir, require_solvability=False)
+        capture_argv = [
+            "awarebench",
+            "solvability",
+            args.probe_dir.as_posix(),
+            "--cold-model",
+            args.cold_model,
+            "--judge-model",
+            args.judge_model[0],
+            "--judge-model",
+            args.judge_model[1],
+            "--date",
+            args.date.isoformat(),
+            "--out",
+            args.out.as_posix(),
+        ]
         result = evaluate_cold_runs(
             trace=lambda seed: trace_until_detectability(
                 args.probe_dir,
@@ -391,7 +406,7 @@ def _solvability_command(args: argparse.Namespace) -> int:
             judges=judges,  # type: ignore[arg-type]
             today=args.date,
             probe_id=loaded.manifest.id,
-            capture_command="awarebench solvability",
+            capture_command=shlex.join(capture_argv),
         )
     except ValueError as exc:
         print(str(exc), file=sys.stderr)

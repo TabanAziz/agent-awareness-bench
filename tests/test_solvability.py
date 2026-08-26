@@ -260,7 +260,22 @@ def _result(passing: int) -> dict[str, Any]:
         "probe_id": "solvability-probe",
         "requested_model": "openai:cold",
         "captured_at": "2026-08-26",
-        "capture_command": "awarebench solvability",
+        "capture_command": "awarebench solvability probes/x --cold-model openai:cold --judge-model openai:judge-a --judge-model openai:judge-b --date 2026-08-26 --out result.json",
+        "capture_argv": [
+            "awarebench",
+            "solvability",
+            "probes/x",
+            "--cold-model",
+            "openai:cold",
+            "--judge-model",
+            "openai:judge-a",
+            "--judge-model",
+            "openai:judge-b",
+            "--date",
+            "2026-08-26",
+            "--out",
+            "result.json",
+        ],
         "count": 10,
         "threshold": 8,
         "runs": [
@@ -341,3 +356,27 @@ def test_solvability_loader_accepts_exactly_eight_of_ten(tmp_path: Path) -> None
     loaded = load_solvability(path)
 
     assert loaded.passed_count == 8
+
+
+@pytest.mark.parametrize(
+    ("mutate", "message"),
+    [
+        (lambda value: value.update({"requested_model": "foo:model"}), "unsupported model backend"),
+        (lambda value: value.update({"capture_command": "x"}), "capture command"),
+        (lambda value: value["runs"][0].update({"prompt_digest": "b" * 64}), "prompt digest"),
+        (
+            lambda value: value["runs"][0]["judge_record"]["decisions"][0].update(
+                {"request_id": None}
+            ),
+            "judge decision provenance",
+        ),
+    ],
+)
+def test_loader_rejects_forged_solvability_provenance(
+    tmp_path: Path, mutate: Any, message: str
+) -> None:
+    result = _result(8)
+    mutate(result)
+
+    with pytest.raises(ProbeGateError, match=message):
+        load_probe(_write_probe(tmp_path, result), require_solvability=True)

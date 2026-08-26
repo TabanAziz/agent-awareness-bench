@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import shlex
 import json
 from collections.abc import Callable, Sequence
 from datetime import date
@@ -38,13 +39,17 @@ class ColdRun(BaseModel):
     identified_fault: bool | None
     judge_record: JudgeRecord
 
-    @field_validator("requested_model", "resolved_model")
+    @field_validator("requested_model")
     @classmethod
     def _real_model(cls, value: str) -> str:
-        canonical = canonical_judge_model(value)
-        if canonical.startswith("stub:"):
-            raise ValueError("stub model provenance is not publishable")
-        return canonical
+        return _canonical_supported_model(value)
+
+    @field_validator("resolved_model")
+    @classmethod
+    def _resolved_model(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("resolved model provenance is required")
+        return value
 
     @model_validator(mode="after")
     def _audit_judgments_when_present(self) -> ColdRun:
@@ -67,6 +72,7 @@ class SolvabilityResult(BaseModel):
     requested_model: str = Field(min_length=1)
     captured_at: date
     capture_command: str = Field(min_length=1)
+    capture_argv: list[str] = Field(min_length=1)
     count: int
     threshold: int
     runs: list[ColdRun]
@@ -74,10 +80,7 @@ class SolvabilityResult(BaseModel):
     @field_validator("requested_model")
     @classmethod
     def _real_requested_model(cls, value: str) -> str:
-        canonical = canonical_judge_model(value)
-        if canonical.startswith("stub:"):
-            raise ValueError("stub cold solver provenance is not publishable")
-        return canonical
+        return _canonical_supported_model(value)
 
     @model_validator(mode="after")
     def _enforce_gate_contract(self) -> SolvabilityResult:
@@ -107,6 +110,17 @@ class SolvabilityResult(BaseModel):
                 raise ValueError("judge models must remain stable across runs")
             if [item.response_model for item in run.judge_record.decisions] != first_resolved:
                 raise ValueError("resolved judge models must remain stable across runs")
+            for decision in run.judge_record.decisions:
+                if (
+                    not decision.request_id
+                    or not decision.response_model
+                    or not decision.stop_reason
+                ):
+                    raise ValueError("judge decision provenance is required")
+                if decision.prompt_tokens is None or decision.completion_tokens is None:
+                    raise ValueError("judge token provenance is required")
+        if self.capture_command != shlex.join(self.capture_argv):
+            raise ValueError("capture command does not match capture argv")
         return self
 
     @property
@@ -201,7 +215,7 @@ def evaluate_cold_runs(
 
     if not isinstance(rubric, JudgeRubric):
         raise ValueError("rubric must be a JudgeRubric")
-    cold_model = canonical_judge_model(cold_model)
+    cold_model = _canonical_supported_model(cold_model)
     runs: list[ColdRun] = []
     for seed in range(REQUIRED_RUNS):
         log, t_dp = trace(seed)
@@ -235,6 +249,7 @@ def evaluate_cold_runs(
         requested_model=canonical_judge_model(cold_model),
         captured_at=today,
         capture_command=capture_command,
+        capture_argv=shlex.split(capture_command),
         count=REQUIRED_RUNS,
         threshold=REQUIRED_THRESHOLD,
         runs=runs,
@@ -330,3 +345,11 @@ def _tool_wire(tool: str, args: dict[str, object]) -> str:
     return json.dumps(
         {"thought": "observe", "action": {"type": "tool", "name": tool, "args": args}}
     )
+
+
+def _canonical_supported_model(value: str) -> str:
+    canonical = canonical_judge_model(value)
+    backend = canonical.partition(":")[0]
+    if backend not in {"anthropic", "openai", "openrouter"}:
+        raise ValueError(f"unsupported model backend: {backend}")
+    return canonical
