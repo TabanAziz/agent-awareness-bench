@@ -156,6 +156,11 @@ def _scan_local_paths(root: Path, result: ScanResult) -> None:
                 )
             result.binary_files_skipped += 1
             continue
+        if "\x00" in text:
+            raise ScanError(
+                f"cannot safely inspect repository file {path}: suspicious NUL bytes "
+                "remain after decoding"
+            )
         result.files_inspected += 1
         result.leaks.extend(_check_text(text, str(path), patterns))
 

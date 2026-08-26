@@ -763,6 +763,18 @@ def test_suspicious_nul_content_fails_closed_when_no_supported_text_encoding_mat
     assert "suspicious NUL" in capsys.readouterr().err
 
 
+def test_utf8_decodable_nul_content_fails_closed(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    scanner = _load_scanner()
+    _write_probe(tmp_path)
+    (tmp_path / "nul-utf8-notes.bin").write_bytes(b"C\x00:\x00\\\x00x")
+
+    assert scanner.main([str(tmp_path)]) == 2
+
+    assert "suspicious NUL" in capsys.readouterr().err
+
+
 def test_undecoded_binary_is_reported_but_not_counted_as_inspected(tmp_path: Path) -> None:
     scanner = _load_scanner()
     probes_root = _write_probe(tmp_path).parents[1]
