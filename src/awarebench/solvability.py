@@ -314,9 +314,7 @@ def trace_until_detectability(
     stack_builder: Callable[..., Any],
     policy_by_name: Callable[[str | None], Any],
     default_context_tokens: int,
-    variant: str = "fault",
-    max_cycles: int | None = None,
-) -> tuple[EventLog, int]:
+) -> tuple[EventLog, int, tuple[str, ...]]:
     """Drive one fault environment with only StubAdapter actions through inclusive t_DP."""
     from awarebench.adapters.stub import StubAdapter
     from awarebench.harness.budget import BudgetAccountant
@@ -327,6 +325,71 @@ def trace_until_detectability(
     from awarebench.probes import load_probe
     from awarebench.scoring.predicates import REGISTRY
 
+    loaded = load_probe(probe_dir, require_solvability=False)
+    log = EventLog()
+    clock = VirtualClock()
+    cycles = CycleCounter()
+    budget = BudgetAccountant()
+    parts = stack_builder(loaded, log, clock, cycles, seed, "fault")
+    host = ToolHost(
+        log, clock, cycles, budget, parts.fs, parts.faults, parts.command_handlers, parts.http_table
+    )
+    context = ContextWindow(
+        log,
+        clock,
+        cycles,
+        max_tokens=parts.context_max_tokens
+        or loaded.manifest.context_max_tokens
+        or default_context_tokens,
+        policy=policy_by_name(parts.drop_policy),
+    )
+    for role, content in parts.seed_messages:
+        context.add(role, content)
+    actions = _observation_actions(parts, loaded.manifest.id)
+    adapter = StubAdapter(actions * 40)
+    predicate = REGISTRY[loaded.manifest.detectability_point.predicate_id](
+        loaded.manifest.detectability_point.params
+    )
+    for _ in range(80):
+        AgentLoop(
+            probe=loaded,
+            adapter=adapter,
+            host=host,
+            context=context,
+            budget=budget,
+            log=log,
+            clock=clock,
+            cycles=cycles,
+            max_cycles=1,
+            seed=seed,
+        ).run()
+        if predicate(log):
+            executed = tuple(actions[index % len(actions)] for index in range(cycles.current))
+            return log, cycles.current, executed
+    raise ValueError(f"detectability point was not reached for {loaded.manifest.id} seed {seed}")
+
+
+def replay_trace(
+    probe_dir: Path,
+    seed: int,
+    actions: tuple[str, ...],
+    *,
+    stack_builder: Callable[..., Any],
+    policy_by_name: Callable[[str | None], Any],
+    default_context_tokens: int,
+    variant: str = "control",
+) -> tuple[EventLog, int]:
+    """Replay fault-selected StubAdapter action bytes without inspecting the target arm."""
+    from awarebench.adapters.stub import StubAdapter
+    from awarebench.harness.budget import BudgetAccountant
+    from awarebench.harness.clock import CycleCounter, VirtualClock
+    from awarebench.harness.context import ContextWindow
+    from awarebench.harness.loop import AgentLoop
+    from awarebench.harness.tools import ToolHost
+    from awarebench.probes import load_probe
+
+    if not actions:
+        raise ValueError("fault trace supplied no actions for replay")
     loaded = load_probe(probe_dir, require_solvability=False)
     log = EventLog()
     clock = VirtualClock()
@@ -347,30 +410,25 @@ def trace_until_detectability(
     )
     for role, content in parts.seed_messages:
         context.add(role, content)
-    actions = _observation_actions(parts, loaded.manifest.id)
-    adapter = StubAdapter(actions * 40)
-    predicate = REGISTRY[loaded.manifest.detectability_point.predicate_id](
-        loaded.manifest.detectability_point.params
-    )
-    limit = max_cycles if max_cycles is not None else 80
-    for _ in range(limit):
-        AgentLoop(
-            probe=loaded,
-            adapter=adapter,
-            host=host,
-            context=context,
-            budget=budget,
-            log=log,
-            clock=clock,
-            cycles=cycles,
-            max_cycles=1,
-            seed=seed,
-        ).run()
-        if max_cycles is None and predicate(log):
-            return log, cycles.current
-    if max_cycles is not None:
-        return log, cycles.current
-    raise ValueError(f"detectability point was not reached for {loaded.manifest.id} seed {seed}")
+    outcome = AgentLoop(
+        probe=loaded,
+        adapter=StubAdapter(actions),
+        host=host,
+        context=context,
+        budget=budget,
+        log=log,
+        clock=clock,
+        cycles=cycles,
+        max_cycles=len(actions),
+        seed=seed,
+    ).run()
+    if outcome.status == "adapter_failed":
+        raise ValueError("control replay failed before completing fault action sequence")
+    calls = [event for event in log if event.type == EventType.TOOL_CALL]
+    results = [event for event in log if event.type == EventType.TOOL_RESULT]
+    if cycles.current != len(actions) or len(calls) != len(actions) or len(results) != len(actions):
+        raise ValueError("control replay could not execute a fault action without substitution")
+    return log, cycles.current
 
 
 def _observation_actions(parts: Any, probe_id: str) -> list[str]:

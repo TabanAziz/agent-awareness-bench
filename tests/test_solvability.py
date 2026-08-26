@@ -28,6 +28,7 @@ from awarebench.solvability import (
     SOLVABILITY_FILENAME,
     build_cold_prompt,
     load_solvability,
+    replay_trace,
     tool_outputs_through_detectability,
     trace_until_detectability,
 )
@@ -173,7 +174,7 @@ def test_cold_prompt_matches_actual_agentloop_tool_messages_through_t_dp(tmp_pat
 def test_stub_trace_reaches_detectability_for_every_current_probe(
     manifest: Path, seed: int
 ) -> None:
-    fault_log, detectability_cycle = trace_until_detectability(
+    fault_log, detectability_cycle, fault_actions = trace_until_detectability(
         manifest.parent,
         seed,
         stack_builder=lambda probe, log, clock, cycles, seed, variant: _build_stack(
@@ -187,23 +188,104 @@ def test_stub_trace_reaches_detectability_for_every_current_probe(
     assert tool_outputs_through_detectability(
         list(fault_log), detectability_cycle=detectability_cycle
     )
-    control_log, control_cycles = trace_until_detectability(
+    control_log, control_cycles = replay_trace(
         manifest.parent,
         seed,
+        actions=fault_actions,
         stack_builder=lambda probe, log, clock, cycles, seed, variant: _build_stack(
             probe, log, clock, cycles, seed=seed, variant=variant
         ),
         policy_by_name=_policy_by_name,
         default_context_tokens=DEFAULT_CONTEXT_TOKENS,
         variant="control",
-        max_cycles=detectability_cycle,
     )
     assert control_cycles == detectability_cycle
+    assert [
+        (event.payload["tool"], event.payload["args"])
+        for event in fault_log
+        if event.type == EventType.TOOL_CALL
+    ] == [
+        (event.payload["tool"], event.payload["args"])
+        for event in control_log
+        if event.type == EventType.TOOL_CALL
+    ]
     assert build_cold_prompt(
         tool_outputs_through_detectability(
             list(control_log), detectability_cycle=detectability_cycle
         )
     ).endswith(COLD_QUESTION.encode("utf-8"))
+
+
+def test_control_replay_preserves_fault_action_bytes_and_fails_closed_when_unavailable() -> None:
+    """A deliberately different control surface may not substitute a new plan."""
+    probe_dir = Path("probes/futile-loop/progress-plateau")
+
+    def build_with_missing_control_command(
+        probe: LoadedProbe,
+        log: EventLog,
+        clock: VirtualClock,
+        cycles: CycleCounter,
+        seed: int,
+        variant: str,
+    ) -> Any:
+        parts = _build_stack(probe, log, clock, cycles, seed=seed, variant=variant)
+        if variant == "control":
+            parts.command_handlers.clear()
+        return parts
+
+    fault_log, cutoff, fault_actions = trace_until_detectability(
+        probe_dir,
+        0,
+        stack_builder=build_with_missing_control_command,
+        policy_by_name=_policy_by_name,
+        default_context_tokens=DEFAULT_CONTEXT_TOKENS,
+    )
+
+    assert fault_actions
+    assert len(fault_actions) == cutoff
+    with pytest.raises(ValueError, match="could not execute a fault action"):
+        replay_trace(
+            probe_dir,
+            0,
+            fault_actions,
+            stack_builder=build_with_missing_control_command,
+            policy_by_name=_policy_by_name,
+            default_context_tokens=DEFAULT_CONTEXT_TOKENS,
+        )
+    fault_calls = [
+        (event.payload["tool"], event.payload["args"])
+        for event in fault_log
+        if event.type == EventType.TOOL_CALL
+    ]
+    assert fault_calls
+
+
+def test_paired_trace_plans_once_then_replays_serialized_fault_actions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fault_log = EventLog()
+    control_log = EventLog()
+    actions = ('{"action":{"type":"tool","name":"read_file","args":{"path":"x"}}}',)
+    calls: list[tuple[str, tuple[str, ...] | None]] = []
+
+    def fault_trace(*args: Any, **kwargs: Any) -> tuple[EventLog, int, tuple[str, ...]]:
+        assert kwargs.get("variant", "fault") == "fault"
+        calls.append(("plan", None))
+        return fault_log, 1, actions
+
+    def control_replay(*args: Any, **kwargs: Any) -> tuple[EventLog, int]:
+        calls.append(("replay", kwargs["actions"]))
+        return control_log, 1
+
+    monkeypatch.setattr(cli, "trace_until_detectability", fault_trace)
+    monkeypatch.setattr(cli, "replay_trace", control_replay)
+
+    assert cli._paired_solvability_trace(Path("synthetic-probe"), 4) == (
+        fault_log,
+        control_log,
+        1,
+    )
+    assert calls == [("plan", None), ("replay", actions)]
 
 
 def test_stale_cache_fault_reaches_detectability_and_control_does_not() -> None:

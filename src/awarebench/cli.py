@@ -53,6 +53,7 @@ from awarebench.solvability import (
     SOLVABILITY_FILENAME,
     evaluate_cold_runs,
     load_solvability,
+    replay_trace,
     trace_until_detectability,
     validate_current_prompts,
 )
@@ -438,22 +439,24 @@ def _paired_solvability_trace(probe_dir: Path, seed: int) -> tuple[EventLog, Eve
     stack_builder = lambda probe, log, clock, cycles, run_seed, variant: _build_stack(
         probe, log, clock, cycles, seed=run_seed, variant=variant
     )
-    fault_log, cutoff = trace_until_detectability(
+    fault_log, cutoff, fault_actions = trace_until_detectability(
         probe_dir,
         seed,
         stack_builder=stack_builder,
         policy_by_name=_policy_by_name,
         default_context_tokens=DEFAULT_CONTEXT_TOKENS,
     )
-    control_log, _ = trace_until_detectability(
+    control_log, control_cycles = replay_trace(
         probe_dir,
         seed,
+        actions=fault_actions,
         stack_builder=stack_builder,
         policy_by_name=_policy_by_name,
         default_context_tokens=DEFAULT_CONTEXT_TOKENS,
         variant="control",
-        max_cycles=cutoff,
     )
+    if control_cycles != cutoff:
+        raise ValueError("control replay did not preserve the fault detectability cutoff")
     return fault_log, control_log, cutoff
 
 
