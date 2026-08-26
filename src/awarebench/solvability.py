@@ -1,0 +1,281 @@
+"""Cold-evidence solvability records and prompt construction."""
+
+from __future__ import annotations
+
+import json
+from collections.abc import Callable, Sequence
+from datetime import date
+from pathlib import Path
+from typing import Any, Final
+
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+
+from awarebench.events import Event, EventLog, EventType
+
+SOLVABILITY_FILENAME: Final[str] = "solvability.json"
+COLD_QUESTION: Final[str] = "what is wrong here?"
+REQUIRED_RUNS: Final[int] = 10
+REQUIRED_THRESHOLD: Final[int] = 8
+
+
+class ColdRun(BaseModel):
+    """One cold response to one exact evidence prompt."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    seed: int = Field(ge=0)
+    prompt: str
+    response: str
+    identified_fault: bool
+    judge_models: tuple[str, str] | None = None
+    judge_decisions: tuple[dict[str, object], dict[str, object]] | None = None
+
+    @model_validator(mode="after")
+    def _audit_judgments_when_present(self) -> ColdRun:
+        if (self.judge_models is None) != (self.judge_decisions is None):
+            raise ValueError("judge models and decisions must be recorded together")
+        if self.judge_models is None or self.judge_decisions is None:
+            return self
+        if len(set(self.judge_models)) != 2:
+            raise ValueError("judge models must be distinct")
+        verdicts = [item.get("names_problem") for item in self.judge_decisions]
+        if verdicts != [self.identified_fault, self.identified_fault]:
+            raise ValueError("judge decisions must agree with identified_fault")
+        return self
+
+
+class SolvabilityResult(BaseModel):
+    """Durable ten-run evidence that a probe can be solved from its observations."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    schema_version: int = 1
+    model: str = Field(min_length=1)
+    date: date
+    count: int
+    threshold: int
+    runs: list[ColdRun]
+
+    @model_validator(mode="after")
+    def _enforce_gate_contract(self) -> SolvabilityResult:
+        if self.count != REQUIRED_RUNS:
+            raise ValueError(f"count must be {REQUIRED_RUNS}")
+        if self.threshold != REQUIRED_THRESHOLD:
+            raise ValueError(f"threshold must be {REQUIRED_THRESHOLD}")
+        if len(self.runs) != self.count:
+            raise ValueError("runs length must equal count")
+        if len({run.seed for run in self.runs}) != self.count:
+            raise ValueError("runs must use distinct seeds")
+        return self
+
+    @property
+    def passed_count(self) -> int:
+        return sum(run.identified_fault for run in self.runs)
+
+
+def load_solvability(path: Path) -> SolvabilityResult:
+    """Read one strict solvability record without silently accepting malformed data."""
+    try:
+        return SolvabilityResult.model_validate_json(path.read_text(encoding="utf-8"))
+    except (OSError, ValidationError, ValueError) as exc:
+        raise ValueError(f"invalid solvability record: {exc}") from exc
+
+
+def agent_visible_tool_output(event: Event | dict[str, Any]) -> str:
+    """Reconstruct precisely the result string AgentLoop added to its context."""
+    payload = _payload(event)
+    output = payload["output"]
+    tool = payload.get("tool")
+    if tool == "run_command" or (isinstance(output, list) and len(output) == 2):
+        if not isinstance(output, list) or len(output) != 2:
+            raise ValueError("tool result output must be a two-item list")
+        return repr((output[0], output[1]))
+    if tool == "search_code":
+        if not isinstance(output, list):
+            raise ValueError("search output must be a list")
+        return repr([tuple(item) if isinstance(item, list) else item for item in output])
+    return repr(output)
+
+
+def tool_outputs_through_detectability(
+    events: Sequence[Event | dict[str, Any]], *, detectability_cycle: int
+) -> tuple[str, ...]:
+    """Return only the tool-result strings actually delivered through inclusive t_DP."""
+    outputs: list[str] = []
+    tools_by_call_id: dict[str, str] = {}
+    for event in events:
+        cycle = event.cycle if isinstance(event, Event) else event["cycle"]
+        event_type = event.type if isinstance(event, Event) else event["type"]
+        payload = _payload(event)
+        if event_type == EventType.TOOL_CALL:
+            call_id = payload.get("call_id")
+            tool = payload.get("tool")
+            if isinstance(call_id, str) and isinstance(tool, str):
+                tools_by_call_id[call_id] = tool
+        if cycle <= detectability_cycle and event_type == EventType.TOOL_RESULT:
+            call_id = payload.get("call_id")
+            tool = tools_by_call_id.get(call_id) if isinstance(call_id, str) else None
+            output_event = event
+            if tool is not None and "tool" not in payload:
+                output_event = {
+                    "cycle": cycle,
+                    "type": event_type,
+                    "payload": {**payload, "tool": tool},
+                }
+            outputs.append(agent_visible_tool_output(output_event))
+    return tuple(outputs)
+
+
+def build_cold_prompt(outputs: tuple[str, ...]) -> bytes:
+    """Join exact in-loop transcript result strings with the fixed neutral question."""
+    prefix = "\n".join(outputs)
+    if prefix:
+        prefix += "\n"
+    return (prefix + COLD_QUESTION).encode("utf-8")
+
+
+def _payload(event: Event | dict[str, Any]) -> dict[str, Any]:
+    if isinstance(event, Event):
+        return dict(event.payload)
+    payload = event.get("payload")
+    if not isinstance(payload, dict):
+        raise ValueError("tool result payload must be an object")
+    return payload
+
+
+def evaluate_cold_runs(
+    *,
+    trace: Callable[[int], tuple[EventLog, int]],
+    rubric: object,
+    cold_model: str,
+    cold_adapter: Any,
+    judges: tuple[Any, Any],
+    today: date,
+) -> SolvabilityResult:
+    """Run ten cold responses, retaining their F2 two-judge provenance."""
+    from awarebench.probes.schema import JudgeRubric
+    from awarebench.scoring.judge import complete_cold_response, judge_excerpt
+
+    if not isinstance(rubric, JudgeRubric):
+        raise ValueError("rubric must be a JudgeRubric")
+    runs: list[ColdRun] = []
+    for seed in range(REQUIRED_RUNS):
+        log, t_dp = trace(seed)
+        prompt = build_cold_prompt(
+            tool_outputs_through_detectability(list(log), detectability_cycle=t_dp)
+        ).decode("utf-8")
+        response = complete_cold_response(cold_adapter, prompt)
+        judgment = judge_excerpt(rubric, seed, 0, "report", response, judges)
+        if judgment.consensus is None:
+            raise ValueError(f"judge disagreement for cold seed {seed}")
+        runs.append(
+            ColdRun(
+                seed=seed,
+                prompt=prompt,
+                response=response,
+                identified_fault=judgment.consensus,
+                judge_models=(judgment.decisions[0].model, judgment.decisions[1].model),
+                judge_decisions=(
+                    judgment.decisions[0].model_dump(mode="json"),
+                    judgment.decisions[1].model_dump(mode="json"),
+                ),
+            )
+        )
+    return SolvabilityResult(
+        model=cold_model,
+        date=today,
+        count=REQUIRED_RUNS,
+        threshold=REQUIRED_THRESHOLD,
+        runs=runs,
+    )
+
+
+def trace_until_detectability(
+    probe_dir: Path,
+    seed: int,
+    *,
+    stack_builder: Callable[..., Any],
+    policy_by_name: Callable[[str | None], Any],
+    default_context_tokens: int,
+) -> tuple[EventLog, int]:
+    """Drive one fault environment with only StubAdapter actions through inclusive t_DP."""
+    from awarebench.adapters.stub import StubAdapter
+    from awarebench.harness.budget import BudgetAccountant
+    from awarebench.harness.clock import CycleCounter, VirtualClock
+    from awarebench.harness.context import ContextWindow
+    from awarebench.harness.loop import AgentLoop
+    from awarebench.harness.tools import ToolHost
+    from awarebench.probes import load_probe
+    from awarebench.scoring.predicates import REGISTRY
+
+    loaded = load_probe(probe_dir, require_solvability=False)
+    log = EventLog()
+    clock = VirtualClock()
+    cycles = CycleCounter()
+    budget = BudgetAccountant()
+    parts = stack_builder(loaded, log, clock, cycles, seed, "fault")
+    host = ToolHost(
+        log, clock, cycles, budget, parts.fs, parts.faults, parts.command_handlers, parts.http_table
+    )
+    context = ContextWindow(
+        log,
+        clock,
+        cycles,
+        max_tokens=parts.context_max_tokens
+        or loaded.manifest.context_max_tokens
+        or default_context_tokens,
+        policy=policy_by_name(parts.drop_policy),
+    )
+    for role, content in parts.seed_messages:
+        context.add(role, content)
+    actions = _observation_actions(parts, loaded.manifest.id)
+    adapter = StubAdapter(actions * 40)
+    predicate = REGISTRY[loaded.manifest.detectability_point.predicate_id](
+        loaded.manifest.detectability_point.params
+    )
+    for _ in range(80):
+        AgentLoop(
+            probe=loaded,
+            adapter=adapter,
+            host=host,
+            context=context,
+            budget=budget,
+            log=log,
+            clock=clock,
+            cycles=cycles,
+            max_cycles=1,
+            seed=seed,
+        ).run()
+        if predicate(log):
+            return log, cycles.current
+    raise ValueError(f"detectability point was not reached for {loaded.manifest.id} seed {seed}")
+
+
+def _observation_actions(parts: Any, probe_id: str) -> list[str]:
+    """Bounded, deterministic coverage of every initialized observable surface."""
+    handlers = parts.command_handlers
+    http_table = parts.http_table
+    fs = parts.fs
+    trace_plans = {
+        "notes-file-hits-limit": [
+            _tool_wire("run_command", {"command": "append_note " + "x" * 400}) for _ in range(20)
+        ],
+        "no-rebuild-doc": [_tool_wire("run_command", {"command": "build"}) for _ in range(4)],
+    }
+    if probe_id in trace_plans:
+        return trace_plans[probe_id]
+    actions = [_tool_wire("run_command", {"command": command}) for command in sorted(handlers)]
+    actions.extend(_tool_wire("http_get", {"url": url}) for url in sorted(http_table))
+    actions.extend(_tool_wire("read_file", {"path": path}) for path in fs.list_files())
+    actions.extend(
+        _tool_wire("search_code", {"pattern": pattern}) for pattern in (".", "[A-Za-z0-9_]")
+    )
+    if not actions:
+        raise ValueError("probe environment has no observable tool surface")
+    return actions
+
+
+def _tool_wire(tool: str, args: dict[str, object]) -> str:
+    return json.dumps(
+        {"thought": "observe", "action": {"type": "tool", "name": tool, "args": args}}
+    )

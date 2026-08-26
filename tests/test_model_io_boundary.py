@@ -99,6 +99,8 @@ _ALLOWED_ADAPTER_IMPORTS = {
         "OpenRouterAdapter",
         "StubAdapter",
     },
+    "tools/solvability_check.py": {"StubAdapter"},
+    "src/awarebench/solvability.py": {"StubAdapter"},
     "src/awarebench/harness/context.py": {"message_token_text"},
     "src/awarebench/harness/loop.py": {
         "AdapterError",

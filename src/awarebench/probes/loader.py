@@ -18,6 +18,7 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 from awarebench.probes.schema import PATH_FIELDS, ProbeManifest, validate_relative_path
 from awarebench.scoring.action import ACTION_REGISTRY
 from awarebench.scoring.predicates import REGISTRY, PredicateFactory
+from awarebench.solvability import SOLVABILITY_FILENAME, load_solvability
 
 _FILE_GATES: Final[dict[str, str]] = {
     "environment_dockerfile": "missing environment dockerfile",
@@ -47,7 +48,12 @@ class LoadedProbe(BaseModel):
     generator: Path
 
 
-def load_probe(probe_dir: Path, registry: dict[str, PredicateFactory] | None = None) -> LoadedProbe:
+def load_probe(
+    probe_dir: Path,
+    registry: dict[str, PredicateFactory] | None = None,
+    *,
+    require_solvability: bool = False,
+) -> LoadedProbe:
     """Load and gate-check the probe under probe_dir.
 
     Gate order: manifest present and parseable (a), raw path safety (h),
@@ -129,6 +135,9 @@ def load_probe(probe_dir: Path, registry: dict[str, PredicateFactory] | None = N
             msg = f"control predicate '{spec.predicate_id}' not machine-checkable: {exc}"
             raise ProbeGateError(msg) from exc
 
+    if require_solvability:
+        _ensure_solvability_passes(root)
+
     resolved: dict[str, Path] = {}
     for field_name in PATH_FIELDS:
         ref = getattr(manifest, field_name)
@@ -146,6 +155,21 @@ def load_probe(probe_dir: Path, registry: dict[str, PredicateFactory] | None = N
         control=resolved["control"],
         generator=resolved["generator"],
     )
+
+
+def _ensure_solvability_passes(root: Path) -> None:
+    """Reject probes lacking ten cold runs or the documented eight-run threshold."""
+    path = root / SOLVABILITY_FILENAME
+    if not path.is_file():
+        raise ProbeGateError(f"missing solvability record: expected {SOLVABILITY_FILENAME}")
+    try:
+        result = load_solvability(path)
+    except ValueError as exc:
+        raise ProbeGateError(str(exc)) from exc
+    if result.passed_count < result.threshold:
+        raise ProbeGateError(
+            f"solvability below threshold: {result.passed_count}/{result.count} < {result.threshold}"
+        )
 
 
 def _load_raw_manifest(root: Path) -> dict[str, Any]:

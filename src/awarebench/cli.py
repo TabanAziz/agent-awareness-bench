@@ -49,6 +49,7 @@ from awarebench.scoring.judge_validation import (
     load_validation_labels,
     write_validation_corpus,
 )
+from awarebench.solvability import evaluate_cold_runs, trace_until_detectability
 
 DEFAULT_CONTEXT_TOKENS: Final[int] = 16_384
 MAX_SEED: Final[int] = (1 << 63) - 1
@@ -129,6 +130,15 @@ def main(argv: list[str] | None = None) -> int:
     capture_parser.add_argument("--judged-at", type=date.fromisoformat, required=True)
     capture_parser.add_argument("--out", type=Path, required=True)
 
+    solvability_parser = subparsers.add_parser(
+        "solvability", help="Run ten cold solvability checks."
+    )
+    solvability_parser.add_argument("probe_dir", type=Path)
+    solvability_parser.add_argument("--cold-model", required=True)
+    solvability_parser.add_argument("--judge-model", action="append", required=True)
+    solvability_parser.add_argument("--date", type=date.fromisoformat, required=True)
+    solvability_parser.add_argument("--out", type=Path, required=True)
+
     args = parser.parse_args(argv)
 
     try:
@@ -136,6 +146,8 @@ def main(argv: list[str] | None = None) -> int:
             return _judge_command(args)
         if args.command == "judge-validation-capture":
             return _judge_validation_capture_command(args)
+        if args.command == "solvability":
+            return _solvability_command(args)
         return _run_command(args)
     except ProbeGateError as exc:
         print(f"probe rejected: {exc}", file=sys.stderr)
@@ -343,6 +355,41 @@ def _judge_command(args: argparse.Namespace) -> int:
         f"detection={detection} detection_latency={detection_latency} action_gap={action_gap} "
         f"judge_disagreement_rate={result.disagreement_rate}"
     )
+    return 0
+
+
+def _solvability_command(args: argparse.Namespace) -> int:
+    if args.out.exists():
+        print(f"solvability output already exists: {args.out}", file=sys.stderr)
+        return 2
+    if len(args.judge_model) != 2:
+        print("exactly two --judge-model values are required", file=sys.stderr)
+        return 2
+    try:
+        cold_adapter = _build_judge_adapter(args.cold_model)
+        judges = tuple(NamedJudge(model, _build_judge_adapter(model)) for model in args.judge_model)
+        loaded = load_probe(args.probe_dir, require_solvability=False)
+        result = evaluate_cold_runs(
+            trace=lambda seed: trace_until_detectability(
+                args.probe_dir,
+                seed,
+                stack_builder=lambda probe, log, clock, cycles, run_seed, variant: _build_stack(
+                    probe, log, clock, cycles, seed=run_seed, variant=variant
+                ),
+                policy_by_name=_policy_by_name,
+                default_context_tokens=DEFAULT_CONTEXT_TOKENS,
+            ),
+            rubric=loaded.manifest.judge_rubric,
+            cold_model=args.cold_model,
+            cold_adapter=cold_adapter,
+            judges=judges,  # type: ignore[arg-type]
+            today=args.date,
+        )
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    args.out.write_text(result.model_dump_json(indent=2) + "\n", encoding="utf-8")
+    print(f"solvability={result.passed_count}/{result.count}")
     return 0
 
 
