@@ -15,7 +15,7 @@ Python 3.12+ is required (PEP 695 recursive type aliases).
 
 1. Open an issue describing the fault, the detectability point, and the success criteria.
 2. Create `probes/<class>/<probe-id>/` with `probe.yaml`, `generator.py`, `injection.py`, `control.py`, and a maintainer-facing `README.md`.
-3. Run `uv run python tools/leakage_scan.py probes/` to verify zero eval signals.
+3. Run `uv run python tools/leakage_scan.py .` to verify zero eval signals.
 4. Write end-to-end tests showing compliant behavior passes and blind continuation fails.
 5. Open a PR; the loader must accept your manifest and all gates must pass.
 

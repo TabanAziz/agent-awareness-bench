@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import getpass
 import importlib.util
 import sys
 from pathlib import Path
@@ -32,6 +31,8 @@ def _write_probe(
     *,
     runtime_text: str = "all clear",
     command_text: str = "all clear",
+    delayed_command_text: str = "all clear",
+    source_literal: str | None = None,
 ) -> Path:
     root = tmp_path / "probes" / "futile-loop" / "scanner-probe"
     root.mkdir(parents=True)
@@ -65,11 +66,20 @@ def _write_probe(
     )
     runtime_expression = _encoded_expression(runtime_text)
     command_expression = _encoded_expression(command_text)
+    delayed_command_expression = _encoded_expression(delayed_command_text)
     applier = (
         "def apply(parts, seed, log, variant):\n"
         f"    parts.fs.write('runtime.txt', {runtime_expression})\n"
-        f"    parts.command_handlers['status'] = lambda command: (0, {command_expression})\n"
+        f"    outputs = ({command_expression}, {delayed_command_expression})\n"
+        "    state = {'calls': 0}\n"
+        "    def status(command):\n"
+        "        index = min(state['calls'], len(outputs) - 1)\n"
+        "        state['calls'] += 1\n"
+        "        return 0, outputs[index]\n"
+        "    parts.command_handlers['status'] = status\n"
     )
+    if source_literal is not None:
+        applier += f"SOURCE_ONLY = {source_literal!r}\n"
     (root / "injection.py").write_text(applier, encoding="utf-8")
     (root / "control.py").write_text(applier, encoding="utf-8")
     return root
@@ -87,13 +97,16 @@ def test_missing_yaml_dependency_fails_before_scanning() -> None:
             raise ImportError("yaml is unavailable")
         return real_import(name, *args, **kwargs)
 
-    with patch.object(builtins, "__import__", side_effect=reject_yaml), pytest.raises(
-        ImportError, match="yaml is unavailable"
+    with (
+        patch.object(builtins, "__import__", side_effect=reject_yaml),
+        pytest.raises(ImportError, match="yaml is unavailable"),
     ):
         runpy.run_path(str(scanner), run_name="leakage_scan_without_yaml")
 
 
-def test_parse_error_exits_nonzero_and_names_manifest(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_parse_error_exits_nonzero_and_names_manifest(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     scanner = _load_scanner()
     manifest = tmp_path / "probes" / "broken" / "probe.yaml"
     manifest.parent.mkdir(parents=True)
@@ -112,7 +125,9 @@ def test_zero_file_scan_fails_loudly(tmp_path: Path, capsys: pytest.CaptureFixtu
     assert "0 files" in capsys.readouterr().err
 
 
-def test_planted_agent_visible_leak_exits_one(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_planted_agent_visible_leak_exits_one(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     scanner = _load_scanner()
     probes_root = _write_probe(tmp_path, runtime_text="this is a benchmark secret").parents[1]
 
@@ -131,7 +146,7 @@ def test_runtime_files_and_command_outputs_are_scanned_for_every_seed(tmp_path: 
     assert result.probes_inspected == 1
     assert result.environments_inspected == 6
     assert result.runtime_files_inspected == 6
-    assert result.command_outputs_inspected == 6
+    assert result.command_outputs_inspected == 18
     assert result.leaks == []
 
 
@@ -146,7 +161,47 @@ def test_planted_command_output_leak_exits_one(
     assert "command=status" in capsys.readouterr().err
 
 
-@pytest.mark.parametrize("leak", ["/" + "home/runner", "/" + "Users/alex", "C:" + "\\temp", "~" + "/.cache"])
+def test_second_command_output_is_scanned(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    scanner = _load_scanner()
+    probes_root = _write_probe(tmp_path, delayed_command_text="this is a benchmark secret").parents[
+        1
+    ]
+
+    assert scanner.main([str(probes_root)]) == 1
+
+    assert "command=status" in capsys.readouterr().err
+
+
+def test_python_source_literals_remain_scanned(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    scanner = _load_scanner()
+    probes_root = _write_probe(tmp_path, source_literal="benchmark").parents[1]
+
+    assert scanner.main([str(probes_root)]) == 1
+
+    assert "source literal" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("surface", ["runtime", "command"])
+def test_runtime_surfaces_reject_local_paths(
+    tmp_path: Path, surface: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    scanner = _load_scanner()
+    local_path = "/" + "home" + "/agent/cache"
+    kwargs = {f"{surface}_text": local_path}
+    probes_root = _write_probe(tmp_path, **kwargs).parents[1]
+
+    assert scanner.main([str(probes_root)]) == 1
+
+    assert "local_path" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "leak", ["/" + "home/runner", "/" + "Users/alex", "C:" + "\\temp", "~" + "/.cache"]
+)
 def test_local_path_in_repo_content_exits_one(
     tmp_path: Path, leak: str, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -159,15 +214,37 @@ def test_local_path_in_repo_content_exits_one(
     assert "local_path" in capsys.readouterr().err
 
 
-@pytest.mark.parametrize("identity_kind", ["username", "parent_directory"])
-def test_local_identity_in_repo_content_exits_one(
-    tmp_path: Path, identity_kind: str, capsys: pytest.CaptureFixture[str]
+def test_path_qualified_unique_identity_in_repo_content_exits_one(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     scanner = _load_scanner()
     _write_probe(tmp_path)
-    identity = getpass.getuser() if identity_kind == "username" else tmp_path.parent.name
-    (tmp_path / "notes.txt").write_text(identity, encoding="utf-8")
+    monkeypatch.setattr(scanner.getpass, "getuser", lambda: "violet-dev-928")
+    (tmp_path / "notes.txt").write_text("/" + "home" + "/violet-dev-928/project", encoding="utf-8")
 
     assert scanner.main([str(tmp_path)]) == 1
 
     assert "local_identity" in capsys.readouterr().err
+
+
+def test_generic_ci_runner_name_is_not_an_identity_leak(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    scanner = _load_scanner()
+    _write_probe(tmp_path)
+    monkeypatch.setattr(scanner.getpass, "getuser", lambda: "runner")
+    (tmp_path / "notes.txt").write_text("runner completed the check", encoding="utf-8")
+
+    assert scanner.main([str(tmp_path)]) == 0
+
+
+def test_ci_scans_from_repository_root() -> None:
+    workflow = Path(__file__).parents[1] / ".github" / "workflows" / "ci.yml"
+    commands = [
+        step["run"]
+        for job in yaml.safe_load(workflow.read_text(encoding="utf-8"))["jobs"].values()
+        for step in job["steps"]
+        if "run" in step and "leakage_scan.py" in step["run"]
+    ]
+
+    assert commands == ["uv run python tools/leakage_scan.py ."]

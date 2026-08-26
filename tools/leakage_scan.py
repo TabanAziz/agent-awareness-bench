@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import getpass
 import re
 import sys
@@ -18,6 +19,23 @@ from awarebench.probes.loader import ProbeGateError, load_probe
 
 SEEDS: Final[tuple[int, ...]] = (0, 1, 2)
 VARIANTS: Final[tuple[str, ...]] = ("fault", "control")
+HANDLER_OUTPUT_SAMPLES: Final[int] = 3
+GENERIC_IDENTITIES: Final[frozenset[str]] = frozenset(
+    {
+        "admin",
+        "administrator",
+        "agent",
+        "build",
+        "ci",
+        "github",
+        "gitlab",
+        "root",
+        "runner",
+        "service",
+        "user",
+        "worktrees",
+    }
+)
 IGNORED_DIRECTORIES: Final[frozenset[str]] = frozenset(
     {".git", ".local", ".mypy_cache", ".pytest_cache", ".ruff_cache", ".venv", "__pycache__"}
 )
@@ -53,6 +71,44 @@ class ScanResult:
     leaks: list[str] = field(default_factory=list)
 
 
+def _identity_patterns(root: Path) -> tuple[tuple[str, re.Pattern[str]], ...]:
+    """Return local-path-qualified patterns for non-generic machine identities."""
+    username = getpass.getuser().casefold()
+    parent = root.parent.name.casefold()
+    candidates = tuple(
+        candidate
+        for candidate in (username, parent)
+        if candidate and candidate not in GENERIC_IDENTITIES
+    )
+    posix_home = re.escape("/" + "home" + "/")
+    posix_users = re.escape("/" + "Users" + "/")
+    windows_users = r"[A-Za-z]:" + re.escape("\\" + "Users" + "\\")
+    user_prefix = f"(?:{posix_home}|{posix_users}|{windows_users})"
+    parent_prefix = "(?:" + posix_home + "[^/]+/|" + posix_users + "[^/]+/|" + windows_users
+    parent_prefix += r"[^\\]+\\)"
+    patterns: list[tuple[str, re.Pattern[str]]] = []
+    if username in candidates:
+        patterns.append(
+            (
+                "local_identity",
+                re.compile(user_prefix + re.escape(username) + r"(?=[/\\]|$)", re.IGNORECASE),
+            )
+        )
+    if parent in candidates:
+        patterns.append(
+            (
+                "local_identity",
+                re.compile(parent_prefix + re.escape(parent) + r"(?=[/\\]|$)", re.IGNORECASE),
+            )
+        )
+    return tuple(patterns)
+
+
+def _agent_visible_patterns(root: Path) -> tuple[tuple[str, re.Pattern[str]], ...]:
+    """Combine evaluation, local path, and path-qualified identity checks."""
+    return LEAK_PATTERNS + LOCAL_PATH_PATTERNS + _identity_patterns(root)
+
+
 def _check_text(
     text: str,
     source: str,
@@ -77,11 +133,7 @@ def _repository_files(root: Path) -> list[Path]:
 
 def _scan_local_paths(root: Path, result: ScanResult) -> None:
     """Scan all repository text, not only probe artifacts, for machine identity."""
-    identifiers = tuple(
-        identifier.casefold()
-        for identifier in (getpass.getuser(), root.parent.name)
-        if identifier
-    )
+    patterns = LOCAL_PATH_PATTERNS + _identity_patterns(root)
     for path in _repository_files(root):
         result.files_inspected += 1
         try:
@@ -90,11 +142,7 @@ def _scan_local_paths(root: Path, result: ScanResult) -> None:
             continue
         except OSError as exc:
             raise ScanError(f"cannot read repository file {path}: {exc}") from exc
-        result.leaks.extend(_check_text(text, str(path), LOCAL_PATH_PATTERNS))
-        lowered = text.casefold()
-        for identifier in identifiers:
-            if identifier in lowered:
-                result.leaks.append(f"{path}: pattern 'local_identity' matched")
+        result.leaks.extend(_check_text(text, str(path), patterns))
 
 
 def _task_text(manifest_path: Path) -> str:
@@ -109,7 +157,43 @@ def _task_text(manifest_path: Path) -> str:
     return task if isinstance(task, str) else ""
 
 
+def _python_string_literals(path: Path) -> list[str]:
+    """Read every Python string literal, preserving the previous source scan surface."""
+    try:
+        module = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    except (OSError, SyntaxError, UnicodeError) as exc:
+        raise ScanError(f"cannot parse Python source {path}: {exc}") from exc
+    docstrings = {
+        id(node.body[0].value)
+        for node in ast.walk(module)
+        if isinstance(node, (ast.AsyncFunctionDef, ast.ClassDef, ast.FunctionDef, ast.Module))
+        and node.body
+        and isinstance(node.body[0], ast.Expr)
+        and isinstance(node.body[0].value, ast.Constant)
+        and isinstance(node.body[0].value.value, str)
+    }
+    return [
+        node.value
+        for node in ast.walk(module)
+        if isinstance(node, ast.Constant)
+        and isinstance(node.value, str)
+        and id(node) not in docstrings
+    ]
+
+
+def _scan_source_literals(probe_dir: Path, result: ScanResult) -> None:
+    """Scan probe artifact literals that can feed agent-visible runtime content."""
+    try:
+        loaded = load_probe(probe_dir)
+    except ProbeGateError as exc:
+        raise ScanError(f"cannot load probe source {probe_dir}: {exc}") from exc
+    for path in (loaded.generator, loaded.injection, loaded.control):
+        for literal in _python_string_literals(path):
+            result.leaks.extend(_check_text(literal, f"{path} [source literal]", LEAK_PATTERNS))
+
+
 def _scan_environment(
+    root: Path,
     probe_dir: Path,
     seed: int,
     variant: str,
@@ -123,37 +207,41 @@ def _scan_environment(
         cycles = CycleCounter()
         parts = _build_stack(loaded, log, clock, cycles, seed=seed, variant=variant)
     except (ImportError, OSError, ProbeGateError, RuntimeError, ValueError) as exc:
-        raise ScanError(
-            f"cannot instantiate {probe_dir} ({variant}, seed {seed}): {exc}"
-        ) from exc
+        raise ScanError(f"cannot instantiate {probe_dir} ({variant}, seed {seed}): {exc}") from exc
 
     result.environments_inspected += 1
     source = f"{probe_dir} [runtime {variant} seed={seed}]"
+    patterns = _agent_visible_patterns(root)
     for virtual_path in parts.fs.list_files():
         content = parts.fs.read(virtual_path)
         if content is None:
             raise ScanError(f"runtime file disappeared in {probe_dir}: {virtual_path}")
         result.runtime_files_inspected += 1
-        result.leaks.extend(_check_text(content, f"{source} {virtual_path}", LEAK_PATTERNS))
+        result.leaks.extend(_check_text(content, f"{source} {virtual_path}", patterns))
 
     for command, handler in sorted(parts.command_handlers.items()):
-        try:
-            _exit_code, output = handler(command)
-        except Exception as exc:
-            raise ScanError(
-                f"cannot inspect command output for {probe_dir} ({variant}, seed {seed}, {command}): {exc}"
-            ) from exc
-        result.command_outputs_inspected += 1
-        result.leaks.extend(_check_text(output, f"{source} command={command}", LEAK_PATTERNS))
+        for output_index in range(HANDLER_OUTPUT_SAMPLES):
+            try:
+                _exit_code, output = handler(command)
+            except Exception as exc:
+                raise ScanError(
+                    f"cannot inspect command output for {probe_dir} "
+                    f"({variant}, seed {seed}, {command}, output {output_index + 1}): {exc}"
+                ) from exc
+            result.command_outputs_inspected += 1
+            result.leaks.extend(_check_text(output, f"{source} command={command}", patterns))
 
 
-def _scan_probe(probe_dir: Path, result: ScanResult) -> None:
+def _scan_probe(root: Path, probe_dir: Path, result: ScanResult) -> None:
     manifest_path = probe_dir / "probe.yaml"
     result.probes_inspected += 1
-    result.leaks.extend(_check_text(_task_text(manifest_path), f"{manifest_path} [task]", LEAK_PATTERNS))
+    result.leaks.extend(
+        _check_text(_task_text(manifest_path), f"{manifest_path} [task]", LEAK_PATTERNS)
+    )
+    _scan_source_literals(probe_dir, result)
     for seed in SEEDS:
         for variant in VARIANTS:
-            _scan_environment(probe_dir, seed, variant, result)
+            _scan_environment(root, probe_dir, seed, variant, result)
 
 
 def scan_root(root: Path) -> ScanResult:
@@ -166,7 +254,7 @@ def scan_root(root: Path) -> ScanResult:
     for manifest_path in sorted(root.rglob("probe.yaml")):
         if any(part in IGNORED_DIRECTORIES for part in manifest_path.relative_to(root).parts):
             continue
-        _scan_probe(manifest_path.parent, result)
+        _scan_probe(root, manifest_path.parent, result)
     return result
 
 
