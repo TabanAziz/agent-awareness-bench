@@ -717,6 +717,52 @@ def test_bom_encoded_local_path_is_scanned(
     assert "local_path" in capsys.readouterr().err
 
 
+def test_cp1252_file_with_ascii_local_path_is_not_silently_skipped(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    scanner = _load_scanner()
+    _write_probe(tmp_path)
+    (tmp_path / "cp1252-notes.txt").write_bytes(b"\x80 C:" + b"\\" + b"Users\\alice\\secret")
+
+    assert scanner.main([str(tmp_path)]) == 1
+
+    assert "local_path" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("encoding", "bom"),
+    [
+        pytest.param("utf-32-le", b"\xff\xfe\x00\x00", id="utf-32-le-bom"),
+        pytest.param("utf-32-be", b"\x00\x00\xfe\xff", id="utf-32-be-bom"),
+        pytest.param("utf-32-le", b"", id="utf-32-le-bomless"),
+        pytest.param("utf-32-be", b"", id="utf-32-be-bomless"),
+    ],
+)
+def test_utf32_local_path_is_scanned(
+    tmp_path: Path, encoding: str, bom: bytes, capsys: pytest.CaptureFixture[str]
+) -> None:
+    scanner = _load_scanner()
+    _write_probe(tmp_path)
+    local_path = "C:" + "\\" + "Users\\alice\\secret"
+    (tmp_path / "utf32-notes.txt").write_bytes(bom + local_path.encode(encoding))
+
+    assert scanner.main([str(tmp_path)]) == 1
+
+    assert "local_path" in capsys.readouterr().err
+
+
+def test_suspicious_nul_content_fails_closed_when_no_supported_text_encoding_matches(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    scanner = _load_scanner()
+    _write_probe(tmp_path)
+    (tmp_path / "nul-notes.bin").write_bytes(b"\x80C\x00:\x00\\\x00U\x00sers")
+
+    assert scanner.main([str(tmp_path)]) == 2
+
+    assert "suspicious NUL" in capsys.readouterr().err
+
+
 def test_undecoded_binary_is_reported_but_not_counted_as_inspected(tmp_path: Path) -> None:
     scanner = _load_scanner()
     probes_root = _write_probe(tmp_path).parents[1]

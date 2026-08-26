@@ -136,33 +136,63 @@ def _scan_local_paths(root: Path, result: ScanResult) -> None:
     patterns = LOCAL_PATH_PATTERNS + _identity_patterns(root)
     for path in _repository_files(root):
         try:
-            text = _decode_repository_text(path)
+            data = path.read_bytes()
         except OSError as exc:
             raise ScanError(f"cannot read repository file {path}: {exc}") from exc
+        try:
+            text = _decode_repository_text(data)
+        except UnicodeError as exc:
+            raise ScanError(f"cannot decode repository file {path}: {exc}") from exc
         if text is None:
+            # Latin-1 is a lossless byte-to-code-point view, so ASCII path and
+            # identity sequences remain visible even in legacy/opaque content.
+            result.leaks.extend(
+                _check_text(data.decode("latin-1"), f"{path} [raw bytes]", patterns)
+            )
+            if b"\x00" in data:
+                raise ScanError(
+                    f"cannot safely inspect repository file {path}: suspicious NUL bytes "
+                    "do not match a supported text encoding"
+                )
             result.binary_files_skipped += 1
             continue
         result.files_inspected += 1
         result.leaks.extend(_check_text(text, str(path), patterns))
 
 
-def _decode_repository_text(path: Path) -> str | None:
-    """Decode UTF-8 and BOM or NUL-patterned UTF-16; skip opaque binary data."""
-    data = path.read_bytes()
+def _decode_repository_text(data: bytes) -> str | None:
+    """Decode supported text encodings; return None only for opaque non-NUL bytes."""
     if data.startswith(b"\xef\xbb\xbf"):
         return data.decode("utf-8-sig")
+    if data.startswith(b"\xff\xfe\x00\x00"):
+        return data.decode("utf-32-le")
+    if data.startswith(b"\x00\x00\xfe\xff"):
+        return data.decode("utf-32-be")
     if data.startswith((b"\xff\xfe", b"\xfe\xff")):
         return data.decode("utf-16")
+    utf32_encoding = _utf32_encoding_without_bom(data)
+    if utf32_encoding is not None:
+        return data.decode(utf32_encoding)
     if _looks_like_utf16_without_bom(data):
         encoding = "utf-16-le" if data[1::2].count(0) >= data[::2].count(0) else "utf-16-be"
-        try:
-            return data.decode(encoding)
-        except UnicodeDecodeError:
-            return None
+        return data.decode(encoding)
     try:
         return data.decode("utf-8")
     except UnicodeDecodeError:
         return None
+
+
+def _utf32_encoding_without_bom(data: bytes) -> str | None:
+    """Detect BOM-less UTF-32 text by its three consistently NUL byte lanes."""
+    if len(data) < 8 or len(data) % 4:
+        return None
+    lanes = tuple(data[offset::4] for offset in range(4))
+    mostly_nul = tuple(lane.count(0) * 4 >= len(lane) * 3 for lane in lanes)
+    if mostly_nul[1] and mostly_nul[2] and mostly_nul[3] and not mostly_nul[0]:
+        return "utf-32-le"
+    if mostly_nul[0] and mostly_nul[1] and mostly_nul[2] and not mostly_nul[3]:
+        return "utf-32-be"
+    return None
 
 
 def _looks_like_utf16_without_bom(data: bytes) -> bool:
