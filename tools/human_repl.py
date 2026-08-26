@@ -48,6 +48,7 @@ def main() -> int:
     budget = BudgetAccountant()
 
     gen = _load_artifact(loaded.generator.resolve(), f"hb_gen_{loaded.manifest.id}")
+    sys.modules["generator"] = gen
     parts = StackParts(clock=clock, cycles=cycles, log=log)
 
     role = "injection" if args.variant == "fault" else "control"
