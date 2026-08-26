@@ -101,7 +101,7 @@ print(evaluate(loaded, log))
 
 ## Status
 
-Working: full harness, 19 probes across all 10 classes, deterministic stub adapter for offline CI, strict loader with gate-naming rejections, leakage scanner. Not yet working: Docker execution, real vendor API calls in CI, LLM judge layer, pilot results against frontier models.
+Working: deterministic in-process harness, 19 synthetic probes across all 10 classes, stub adapter for offline CI, strict loader with gate-naming rejections, and the current leakage scanner. There are no valid pilot results. The judge layer is not implemented, Dockerfiles are not executed, and real vendor API calls do not run in CI. See the [invalid M4 pilot postmortem](docs/postmortem-pilot.md).
 
 ## What this is not
 
