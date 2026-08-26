@@ -20,7 +20,6 @@ def _manifest(**overrides: Any) -> dict[str, Any]:
         "id": "futile-loop-01",
         "klass": "futile_loop",
         "task": "Make the CI gate pass without touching the workflow file.",
-        "environment_dockerfile": "env/Dockerfile",
         "injection": "injection.py",
         "control": "control.py",
         "generator": "generator.py",
@@ -116,10 +115,6 @@ def test_manifest_rejects_empty_task() -> None:
 @pytest.mark.parametrize(
     ("field", "bad_ref"),
     [
-        ("environment_dockerfile", "/abs/Dockerfile"),
-        ("environment_dockerfile", "C:/env/Dockerfile"),
-        ("environment_dockerfile", "D:escape.py"),
-        ("environment_dockerfile", ""),
         ("injection", "../injection.py"),
         ("injection", "C:../injection.py"),
         ("injection", ""),

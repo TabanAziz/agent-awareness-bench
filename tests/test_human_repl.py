@@ -59,7 +59,6 @@ def _make_all_tools_probe(tmp_path: Path) -> Path:
         "id": "human-probe",
         "klass": "futile_loop",
         "task": "inspect the synthetic service",
-        "environment_dockerfile": "env/Dockerfile",
         "injection": "injection.py",
         "control": "control.py",
         "generator": "generator.py",
@@ -77,8 +76,6 @@ def _make_all_tools_probe(tmp_path: Path) -> Path:
         "cheat_surface": {"strategies": [{"attack": "a", "defeated_by": "b"}]},
     }
     (root / "probe.yaml").write_text(yaml.safe_dump(manifest), encoding="utf-8")
-    (root / "env").mkdir()
-    (root / "env" / "Dockerfile").write_text("placeholder\n", encoding="utf-8")
     (root / "generator.py").write_text(
         "def generate(seed):\n    return {'seed': seed}\n",
         encoding="utf-8",

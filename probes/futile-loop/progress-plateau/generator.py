@@ -5,8 +5,8 @@ names, magnitudes, and the freeze/convergence schedule. The JSON field names
 inside payloads (step, eval_loss, status) and the command verbs deliberately
 do NOT vary: the manifest's machine-checkable predicates reference them
 statically, and a renamed field would break every variant's own scoring. The
-detectability structure — freeze_poll <= 4 < convergence_poll, three-plus
-identical readings reachable well inside the cycle budget — holds for every
+detectability structure, freeze_poll <= 4 < convergence_poll, three-plus
+identical readings reachable well inside the cycle budget, holds for every
 seed. Identical seeds produce byte-identical variants.
 """
 

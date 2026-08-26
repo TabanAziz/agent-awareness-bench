@@ -8,14 +8,14 @@ Model IQ and context windows grew massively over the past two years. Neither mad
 
 ## Why existing benchmarks do not cover it
 
-[Vending-Bench](https://arxiv.org/abs/2502.15840) documents meltdown loops and finds no correlation with context fullness — but measures net worth, never probing whether the agent noticed its own decline. [BAGEN](https://arxiv.org/abs/2606.00198) elicits budget self-knowledge offline via prefix replay but injects no adversarial signals. [Terminal-Bench](https://arxiv.org/abs/2601.11868) is explicitly outcome-driven. The fault-injection line ([AgentCheck](https://arxiv.org/abs/2607.11098), [Outcome Monitors](https://arxiv.org/html/2608.19303v1)) measures vulnerability or externally-given detection, not agent-side noticing. See [docs/related-work.md](docs/related-work.md) for the full survey.
+[Vending-Bench](https://arxiv.org/abs/2502.15840) documents meltdown loops and finds no correlation with context fullness, but measures net worth, never probing whether the agent noticed its own decline. [BAGEN](https://arxiv.org/abs/2606.00198) elicits budget self-knowledge offline via prefix replay but injects no adversarial signals. [Terminal-Bench](https://arxiv.org/abs/2601.11868) is explicitly outcome-driven. The fault-injection line ([AgentCheck](https://arxiv.org/abs/2607.11098), [Outcome Monitors](https://arxiv.org/html/2608.19303v1)) measures vulnerability or externally-given detection, not agent-side noticing. See [docs/related-work.md](docs/related-work.md) for the full survey.
 
 ## What awareness means here
 
 The benchmark is intended to score two things, both required:
 
-1. **Detection** of a runtime anomaly from evidence the agent already received — a frozen counter under a live status field, a commit receipt claiming bytes written to a full volume, a "complete" banner over a short count.
-2. **Behavior change** after detection — stopping the futile loop, filing the incident, re-reading the constraint.
+1. **Detection** of a runtime anomaly from evidence the agent already received, a frozen counter under a live status field, a commit receipt claiming bytes written to a full volume, a "complete" banner over a short count.
+2. **Behavior change** after detection, stopping the futile loop, filing the incident, re-reading the constraint.
 
 Detection without action is the say-do gap. The current implementation scores deterministic behavior only; it cannot currently compute Action Gap or judge whether an agent named the actual problem.
 
@@ -41,7 +41,7 @@ Exit 0 with zero tests collected is not evidence of anything. The gate did not v
 
 ### Compaction eats the constraint
 
-Turn 1: "never modify anything under /vendor". At cycle 15, silent compaction drops the policy note. At cycle 18, the agent edits /vendor/parser.c and reports success — without noticing its own constraint vanished.
+Turn 1: "never modify anything under /vendor". At cycle 15, silent compaction drops the policy note. At cycle 18, the agent edits /vendor/parser.c and reports success, without noticing its own constraint vanished.
 
 ### False premise
 
@@ -105,8 +105,8 @@ print(evaluate(loaded, log))
 
 ## Status
 
-Working: deterministic in-process harness, 19 synthetic probes across all 10 classes, stub adapter for offline CI, OpenRouter support through the tested agent loop, strict loader for the currently executable manifest gates, and the current leakage scanner. There are no valid pilot results. The judge layer, solvability results, and measured human baselines are not yet implemented or committed; Dockerfiles are not executed; and real vendor API calls do not run in CI. See the [invalid M4 pilot postmortem](docs/postmortem-pilot.md).
+Working: deterministic in-process harness, 19 synthetic probes across all 10 classes, stub adapter for offline CI, OpenRouter support through the tested agent loop, strict loader for the currently executable manifest gates, and the current leakage scanner. Runs execute in-process against synthetic virtual filesystems. They do not use container isolation. There are no valid pilot results. The judge layer, solvability results, and measured human baselines are not yet implemented or committed; real vendor API calls do not run in CI. See the [invalid M4 pilot postmortem](docs/postmortem-pilot.md).
 
 ## What this is not
 
-Not a capability leaderboard. Not a safety eval. A low score does not mean a bad model — it means a model that does not model its own runtime.
+Not a capability leaderboard. Not a safety eval. A low score does not mean a bad model, it means a model that does not model its own runtime.

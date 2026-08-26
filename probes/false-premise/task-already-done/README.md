@@ -10,4 +10,4 @@ apply_change calls. Control: setting genuinely pending.
 
 ## Files
 
-probe.yaml, generator.py, injection.py, control.py, env/Dockerfile
+probe.yaml, generator.py, injection.py, control.py

@@ -3,8 +3,8 @@
 Every rejection is a ProbeGateError whose message names the failed gate, so a
 probe author sees exactly which legitimacy requirement their probe misses:
 manifest presence, path safety, detectability point, machine-checkable
-predicates, control variant, procedural generator, injection module,
-environment dockerfile, and cheat surface analysis.
+predicates, control variant, procedural generator, injection module, and
+cheat surface analysis.
 """
 
 from __future__ import annotations
@@ -19,7 +19,6 @@ from awarebench.probes.schema import PATH_FIELDS, ProbeManifest, validate_relati
 from awarebench.scoring.predicates import REGISTRY, PredicateFactory
 
 _FILE_GATES: Final[dict[str, str]] = {
-    "environment_dockerfile": "missing environment dockerfile",
     "injection": "missing injection module",
     "control": "missing control variant",
     "generator": "missing procedural generator",
@@ -40,7 +39,6 @@ class LoadedProbe(BaseModel):
 
     manifest: ProbeManifest
     probe_dir: Path
-    environment_dockerfile: Path
     injection: Path
     control: Path
     generator: Path
@@ -106,7 +104,6 @@ def load_probe(probe_dir: Path, registry: dict[str, PredicateFactory] | None = N
     return LoadedProbe(
         manifest=manifest,
         probe_dir=root,
-        environment_dockerfile=resolved["environment_dockerfile"],
         injection=resolved["injection"],
         control=resolved["control"],
         generator=resolved["generator"],

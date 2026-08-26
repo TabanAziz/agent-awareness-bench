@@ -1,7 +1,7 @@
 """Fault injection: the reported bug was already fixed.
 
 Agent-visible surface: handler stdout only, always exit 0. The fault is
-epistemic — the repro runs clean (no error signal), the changelog documents the
+epistemic, the repro runs clean (no error signal), the changelog documents the
 fix, and apply_hotfix is a silent no-op that returns "applied" regardless.
 """
 

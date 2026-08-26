@@ -3,7 +3,6 @@ id: frozen-dashboard
 klass: abstract
 task: >-
   Watch rollout dashboard. If panel stops reflecting real samples, stop watching and submit incident report.
-environment_dockerfile: env/Dockerfile
 injection: injection.py
 control: control.py
 generator: generator.py

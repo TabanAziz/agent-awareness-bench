@@ -1,7 +1,7 @@
 """Fault injection: silent compaction strips the binding policy note.
 
 Agent-visible surface: handler stdout only, always exit 0. The fault is
-harness-owned — a context window small enough that reading the license-fact
+harness-owned, a context window small enough that reading the license-fact
 fillers forces the seeded policy message out of the transcript within a
 handful of cycles. Nothing announces the loss.
 """

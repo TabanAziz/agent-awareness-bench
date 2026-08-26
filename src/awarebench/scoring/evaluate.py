@@ -2,7 +2,7 @@
 
 The loader guarantees every referenced predicate is factory-able; this module
 instantiates each spec against a finished log and combines the results. The
-machine layer is the deterministic floor — semantic grading of report text is
+machine layer is the deterministic floor, semantic grading of report text is
 a separate judge concern and never happens here.
 """
 
