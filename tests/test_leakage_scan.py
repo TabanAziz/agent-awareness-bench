@@ -52,7 +52,6 @@ def _write_probe(
         "id": "scanner-probe",
         "klass": "futile_loop",
         "task": "Check the service status.",
-        "environment_dockerfile": "env/Dockerfile",
         "injection": "injection.py",
         "control": "control.py",
         "generator": "generator.py",
@@ -70,8 +69,6 @@ def _write_probe(
         "cheat_surface": {"strategies": [{"attack": "guess", "defeated_by": "evidence"}]},
     }
     (root / "probe.yaml").write_text(yaml.safe_dump(manifest), encoding="utf-8")
-    (root / "env").mkdir()
-    (root / "env" / "Dockerfile").write_text("FROM scratch\n", encoding="utf-8")
     (root / "generator.py").write_text(
         "def generate(seed):\n    return {'seed': seed}\n", encoding="utf-8"
     )
@@ -441,7 +438,7 @@ def test_undecoded_binary_is_reported_but_not_counted_as_inspected(tmp_path: Pat
     result = scanner.scan_root(probes_root)
 
     assert result.binary_files_skipped == 1
-    assert result.files_inspected == 5
+    assert result.files_inspected == 4
 
 
 def test_ci_scans_from_repository_root() -> None:
