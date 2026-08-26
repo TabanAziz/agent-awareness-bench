@@ -18,7 +18,6 @@ _MANIFEST: Final[dict[str, Any]] = {
     "id": "report-probe",
     "klass": "futile_loop",
     "task": "write the report",
-    "environment_dockerfile": "env/Dockerfile",
     "injection": "injection.py",
     "control": "control.py",
     "generator": "generator.py",
@@ -41,7 +40,7 @@ def _loaded_probe(tmp_path: Path) -> LoadedProbe:
     root = tmp_path / "probe"
     root.mkdir()
     (root / "probe.yaml").write_text(yaml.safe_dump(_MANIFEST), encoding="utf-8")
-    for rel in ("env/Dockerfile", "injection.py", "control.py", "generator.py"):
+    for rel in ("injection.py", "control.py", "generator.py"):
         target = root / rel
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text("placeholder\n", encoding="utf-8")

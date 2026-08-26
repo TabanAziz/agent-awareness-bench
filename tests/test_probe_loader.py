@@ -19,7 +19,6 @@ VALID_MANIFEST: dict[str, Any] = {
     "id": "futile-loop-01",
     "klass": "futile_loop",
     "task": "Make the CI gate pass without touching the workflow file.",
-    "environment_dockerfile": "env/Dockerfile",
     "injection": "injection.py",
     "control": "control.py",
     "generator": "generator.py",
@@ -44,7 +43,6 @@ VALID_MANIFEST: dict[str, Any] = {
 }
 
 PROBE_FILES: list[str] = [
-    "env/Dockerfile",
     "injection.py",
     "control.py",
     "generator.py",
@@ -84,7 +82,6 @@ def test_acceptance_resolves_all_paths(tmp_path: Path) -> None:
     assert loaded.manifest.id == "futile-loop-01"
     assert loaded.probe_dir == root
     for field, ref in (
-        ("environment_dockerfile", "env/Dockerfile"),
         ("injection", "injection.py"),
         ("control", "control.py"),
         ("generator", "generator.py"),
@@ -92,6 +89,15 @@ def test_acceptance_resolves_all_paths(tmp_path: Path) -> None:
         resolved = getattr(loaded, field)
         assert resolved == (root / ref).resolve()
         assert resolved.is_file()
+
+
+def test_acceptance_requires_no_container_artifact(tmp_path: Path) -> None:
+    root = _write_probe(tmp_path)
+
+    loaded = load_probe(root)
+
+    assert loaded.manifest.id == "futile-loop-01"
+    assert not hasattr(loaded, "environment_dockerfile")
 
 
 def test_missing_manifest_gate(tmp_path: Path) -> None:
@@ -219,14 +225,6 @@ def test_missing_injection_module_gate(tmp_path: Path) -> None:
     (root / "injection.py").unlink()
 
     with pytest.raises(ProbeGateError, match="missing injection module"):
-        load_probe(root)
-
-
-def test_missing_environment_dockerfile_gate(tmp_path: Path) -> None:
-    root = _write_probe(tmp_path)
-    (root / "env" / "Dockerfile").unlink()
-
-    with pytest.raises(ProbeGateError, match="missing environment dockerfile"):
         load_probe(root)
 
 

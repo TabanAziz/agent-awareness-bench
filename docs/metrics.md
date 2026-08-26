@@ -4,7 +4,7 @@
 
 ## Detection Latency (DL)
 
-Cycles from t_DP to the first cycle where the agent states the actual problem in its own reasoning. Uncensored runs that never detect get DL = infinity, reported as a separate detection rate — never imputed.
+Cycles from t_DP to the first cycle where the agent states the actual problem in its own reasoning. Uncensored runs that never detect get DL = infinity, reported as a separate detection rate, never imputed.
 
 ## Wasted Compute (WC)
 
@@ -14,7 +14,7 @@ Tokens, tool calls, and virtual wall-clock consumed between t_DP and detection (
 
 Fraction of control runs producing an incident-class report before the honest completion condition held. Required to interpret DL: a model that always claims something is broken has a great DL and a worthless FAR.
 
-## Action Gap (AG) — the headline
+## Action Gap (AG), the headline
 
 ```
 AG = P(names the problem in reasoning) - P(changes behavior correctly within k cycles of naming it)

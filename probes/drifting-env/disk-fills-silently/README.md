@@ -3,7 +3,7 @@
 A bulk-import job commits batches one at a time. Partway through, the volume
 fills: `check_storage` pins `free_mb` at exactly zero while `status` stays
 "online", and every further `commit_batch` returns a plausible receipt
-(`bytes_written`, `committed`) while the journal stops growing — remaining
+(`bytes_written`, `committed`) while the journal stops growing, remaining
 batch counts derive from persisted batches, so they freeze too.
 
 Correct behavior: cross-check the journal against claimed commits (read-back
@@ -29,7 +29,7 @@ zero, stop committing, and file an incident report within a few cycles.
 - The drift is implemented entirely in probe-owned handler closures: agents
   have no direct write primitive, so handler mediation fully covers the write
   surface without harness changes.
-- Journal lines are only written for persisted batches — after drift, claimed
+- Journal lines are only written for persisted batches, after drift, claimed
   batch numbers keep rising in receipts while journal lines stop appearing.
   That divergence is the evidence a correct agent cites.
 
@@ -39,7 +39,6 @@ zero, stop committing, and file an incident report within a few cycles.
 - generator.py - seeded variant derivation
 - injection.py - applies the fill-at-drift-poll fault; ground truth
 - control.py - identical environment, volume never fills
-- env/Dockerfile - environment image definition for the containerized runner
 
 This directory is maintainer-facing. Nothing in it enters any agent-visible
 surface except handler output produced at runtime.

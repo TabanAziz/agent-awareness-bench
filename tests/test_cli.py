@@ -33,7 +33,6 @@ def _make_probe(tmp_path: Path) -> Path:
         "id": "cli-probe",
         "klass": "futile_loop",
         "task": "make the gate green",
-        "environment_dockerfile": "env/Dockerfile",
         "injection": "injection.py",
         "control": "control.py",
         "generator": "generator.py",
@@ -51,10 +50,6 @@ def _make_probe(tmp_path: Path) -> Path:
         "cheat_surface": {"strategies": [{"attack": "a", "defeated_by": "b"}]},
     }
     (root / "probe.yaml").write_text(yaml.safe_dump(manifest), encoding="utf-8")
-    for rel in ("env/Dockerfile",):
-        target = root / rel
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text("placeholder\n", encoding="utf-8")
     # Minimal artifact modules satisfying the runtime contract the CLI loads.
     (root / "generator.py").write_text(
         "def generate(seed):\n    return {'seed': seed}\n",
@@ -85,7 +80,6 @@ def _make_seeding_probe(
         "id": probe_id,
         "klass": "futile_loop",
         "task": "make the gate green",
-        "environment_dockerfile": "env/Dockerfile",
         "injection": "injection.py",
         "control": "control.py",
         "generator": "generator.py",
@@ -105,8 +99,6 @@ def _make_seeding_probe(
     if manifest_context_tokens is not None:
         manifest["context_max_tokens"] = manifest_context_tokens
     (root / "probe.yaml").write_text(yaml.safe_dump(manifest), encoding="utf-8")
-    (root / "env" / "Dockerfile").parent.mkdir(parents=True, exist_ok=True)
-    (root / "env" / "Dockerfile").write_text("placeholder\n", encoding="utf-8")
     (root / "generator.py").write_text(
         "def generate(seed):\n    return {'seed': seed}\n",
         encoding="utf-8",

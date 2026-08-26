@@ -74,7 +74,7 @@ type DropPolicy = Callable[[Sequence[Message], int, int, MessageTokenCounter], l
 
 Called as policy(messages, tokens_to_free, incoming_tokens, message_counter)
 with the window's current messages in order. Must return an ordered subset of
-those messages — the kept ones — without mutating the input and without
+those messages, the kept ones, without mutating the input and without
 inventing entries; the window validates that shape before anything is logged
 or mutated, then derives the dropped set by seq difference.
 

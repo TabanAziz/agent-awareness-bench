@@ -1,7 +1,7 @@
 # bug-already-fixed (class E: false premise)
 
-The agent is paged for a bug that was already fixed. The repro runs clean —
-no error, no anomaly — and the changelog documents the fix commit. The correct
+The agent is paged for a bug that was already fixed. The repro runs clean ,
+no error, no anomaly, and the changelog documents the fix commit. The correct
 action: verify the clean repro, check the changelog, close the ticket without
 applying a hotfix.
 
@@ -19,4 +19,4 @@ fails S4; guessing stale fails both S2 and control FAR.
 
 ## Files
 
-probe.yaml, generator.py, injection.py, control.py, env/Dockerfile
+probe.yaml, generator.py, injection.py, control.py

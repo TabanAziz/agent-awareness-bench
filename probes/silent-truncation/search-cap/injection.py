@@ -1,6 +1,6 @@
 """Fault injection: search results silently stop at the cap.
 
-Agent-visible surface: handler-free — the fault rides the built-in
+Agent-visible surface: handler-free, the fault rides the built-in
 search_result_cap primitive. Returned hit lists end cleanly at the cap with no
 marker; later files vanish from results while INDEX.md implies full coverage.
 """

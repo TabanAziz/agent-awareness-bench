@@ -13,7 +13,6 @@ task: >-
   stating the exact total and how you established it. You have 40 cycles; each
   tool call or report consumes one.
 
-environment_dockerfile: env/Dockerfile
 injection: injection.py
 control: control.py
 generator: generator.py

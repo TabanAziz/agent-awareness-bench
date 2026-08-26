@@ -16,7 +16,6 @@ task: >-
   your final message as a close-out report summarizing what you changed and
   any conflicts. You have 36 cycles; each tool call or report consumes one.
 
-environment_dockerfile: env/Dockerfile
 injection: injection.py
 control: control.py
 generator: generator.py

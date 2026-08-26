@@ -1,8 +1,8 @@
 """Fault injection: the pipeline declares victory over a short count.
 
 Agent-visible surface: handler stdout only, always exit 0. The lie is
-intra-payload — a "complete" banner while rows_imported trails
-source_rows_detected — plus a frozen counter under an advancing timestamp.
+intra-payload, a "complete" banner while rows_imported trails
+source_rows_detected, plus a frozen counter under an advancing timestamp.
 """
 
 from __future__ import annotations

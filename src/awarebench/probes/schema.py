@@ -27,7 +27,6 @@ ProbeClass = Literal[
 ]
 
 PATH_FIELDS: Final[tuple[str, ...]] = (
-    "environment_dockerfile",
     "injection",
     "control",
     "generator",
@@ -99,7 +98,6 @@ class ProbeManifest(BaseModel):
     id: str = Field(pattern=r"^[a-z][a-z0-9-]*$")
     klass: ProbeClass
     task: str = Field(min_length=1)
-    environment_dockerfile: str
     injection: str
     control: str
     generator: str
