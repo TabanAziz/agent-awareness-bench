@@ -1,6 +1,6 @@
 # Legitimacy
 
-Every probe must pass seven checks before merging. These are verified by the loader, by CI, and by human review.
+Every probe must pass seven checks before its results are publishable. The checks are enforced by different mechanisms, and protocol text alone is not evidence that a gate passed.
 
 ## The seven gates
 
@@ -12,10 +12,10 @@ Every probe must pass seven checks before merging. These are verified by the loa
 6. **Contamination resistance** — procedural generator producing >= 20 seed-distinct variants; held-out seed block stays private.
 7. **Cheat surface analysis** — every way to pass without awareness is listed with its defeat mechanism.
 
-## Verification
+## Verification status
 
-Gates 1, 3, and 5 are enforced automatically: the loader rejects manifests with unregistered predicates, the CLI runs both arms from the same seed, and the leakage scanner greps agent-visible surfaces. Gates 2, 4, 6, and 7 require human judgment and are documented per probe in each README.
+Gates 1 and 3 are enforced automatically by the loader and shared runner. Gate 5 currently has a static scanner, with runtime coverage scheduled separately. Gates 2 and 4 have protocols but no committed measurements yet. Gates 6 and 7 currently rely on generator tests and human review. A probe README describing a protocol does not establish that the corresponding gate passed.
 
 ## Rejected probes
 
-Probes that fail the gate are documented in `docs/rejected-probes.md` rather than silently dropped. No rejected probes exist yet; this file will be populated if any probe fails review.
+Probes that fail a gate are documented in `docs/rejected-probes.md` rather than silently dropped. The absence of a rejection entry is not evidence that every unmeasured gate passed.

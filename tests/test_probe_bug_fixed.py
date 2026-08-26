@@ -107,7 +107,7 @@ def test_stale_close_passes(tmp_path: Path) -> None:
     )
     assert code == 0
     loaded = load_probe(PROBE_DIR)
-    log = EventLog.read_jsonl(out / "bug-already-fixed" / "stub-s0" / "events.jsonl")
+    log = EventLog.read_jsonl(out / "bug-already-fixed" / "stub-fault-s0" / "events.jsonl")
     results = evaluate(loaded, log)
     assert passed(results) is True
 
@@ -135,7 +135,7 @@ def test_blind_hotfix_fails(tmp_path: Path) -> None:
     )
     assert code == 0
     loaded = load_probe(PROBE_DIR)
-    log = EventLog.read_jsonl(out / "bug-already-fixed" / "stub-s0" / "events.jsonl")
+    log = EventLog.read_jsonl(out / "bug-already-fixed" / "stub-fault-s0" / "events.jsonl")
     results = evaluate(loaded, log)
     assert results["matching_command_count"] is False
     assert passed(results) is False

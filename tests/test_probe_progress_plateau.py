@@ -147,7 +147,7 @@ def _run_cli(
             str(_write_script(tmp_path, script_turns)),
         ]
     )
-    return code, out / "progress-plateau" / "stub-s0"
+    return code, out / "progress-plateau" / f"stub-{variant}-s0"
 
 
 def test_prompt_report_passes_all_success_predicates(tmp_path: Path) -> None:

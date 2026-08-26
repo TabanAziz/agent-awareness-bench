@@ -74,7 +74,7 @@ A model that says "progress stopped" at cycle 29 and then sleeps 600 seconds and
 
 ## Legitimacy
 
-Every probe passes seven gates before merging: machine-checkable detectability point, solvability protocol, clean control, human baseline protocol, no eval signals, contamination resistance via procedural variants, and cheat surface analysis. See [docs/legitimacy.md](docs/legitimacy.md). Rejected probes are documented in [docs/rejected-probes.md](docs/rejected-probes.md).
+Every probe is required to pass seven gates before results can be published: machine-checkable detectability point, measured solvability, clean control, measured human baseline, no eval signals, contamination resistance via procedural variants, and cheat surface analysis. Solvability and human-baseline protocols exist, but their result artifacts are not yet committed. See [docs/legitimacy.md](docs/legitimacy.md). Rejected probes are documented in [docs/rejected-probes.md](docs/rejected-probes.md).
 
 ## Running it
 
@@ -89,22 +89,23 @@ uv run awarebench run probes/futile-loop/progress-plateau --model stub --seed 0 
 uv run awarebench run probes/futile-loop/progress-plateau --model openrouter:provider/model-id --seed 0 --variant fault --out runs/
 
 # Read the trace
-cat runs/progress-plateau/stub-s0/events.jsonl
+cat runs/progress-plateau/stub-fault-s0/events.jsonl
 
 # Score the trace
 uv run python -c "
+from pathlib import Path
 from awarebench.probes import load_probe
 from awarebench.events import EventLog
 from awarebench.scoring.evaluate import evaluate, passed
 loaded = load_probe(Path('probes/futile-loop/progress-plateau'))
-log = EventLog.read_jsonl(Path('runs/progress-plateau/stub-s0/events.jsonl'))
+log = EventLog.read_jsonl(Path('runs/progress-plateau/stub-fault-s0/events.jsonl'))
 print(evaluate(loaded, log))
 "
 ```
 
 ## Status
 
-Working: deterministic in-process harness, 19 synthetic probes across all 10 classes, stub adapter for offline CI, OpenRouter support through the tested agent loop, strict loader with gate-naming rejections, and the current leakage scanner. There are no valid pilot results. The judge layer is not implemented, Dockerfiles are not executed, and real vendor API calls do not run in CI. See the [invalid M4 pilot postmortem](docs/postmortem-pilot.md).
+Working: deterministic in-process harness, 19 synthetic probes across all 10 classes, stub adapter for offline CI, OpenRouter support through the tested agent loop, strict loader for the currently executable manifest gates, and the current leakage scanner. There are no valid pilot results. The judge layer, solvability results, and measured human baselines are not yet implemented or committed; Dockerfiles are not executed; and real vendor API calls do not run in CI. See the [invalid M4 pilot postmortem](docs/postmortem-pilot.md).
 
 ## What this is not
 

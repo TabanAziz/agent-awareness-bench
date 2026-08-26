@@ -118,14 +118,17 @@ def _openrouter_response(
     return {
         "choices": [
             {
-                "message": {"content": text, "reasoning": reasoning},
+                "index": 0,
+                "message": {"role": "assistant", "content": text, "reasoning": reasoning},
                 "finish_reason": finish_reason,
             }
         ],
         "usage": {
             "prompt_tokens": prompt_tokens,
             "completion_tokens": completion_tokens,
+            "total_tokens": prompt_tokens + completion_tokens,
         },
+        "object": "chat.completion",
         "model": model,
         "id": response_id,
     }
@@ -769,23 +772,67 @@ def test_openrouter_malformed_shapes_raise_adapter_error(
         adapter.complete([])
 
 
-def test_openrouter_tolerates_missing_optional_metadata() -> None:
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda response: response.pop("model"),
+        lambda response: response.pop("id"),
+        lambda response: response.__setitem__("object", "list"),
+        lambda response: response["choices"][0].__setitem__("index", 7),
+        lambda response: response["choices"][0].__setitem__("index", False),
+        lambda response: response["choices"][0].__setitem__("finish_reason", None),
+        lambda response: response["choices"][0]["message"].__setitem__("role", "user"),
+        lambda response: response["usage"].__setitem__("total_tokens", 999),
+    ],
+)
+def test_openrouter_rejects_missing_or_inconsistent_provenance(mutate: Any) -> None:
     response = _openrouter_response(reasoning=None)
-    del response["model"]
-    del response["id"]
-    response["choices"][0]["finish_reason"] = None
-    transport = _RecordingTransport(response)
-    adapter = OpenRouterAdapter(model="vendor/model", api_key="key", transport=transport)
+    mutate(response)
+    adapter = OpenRouterAdapter(
+        model="vendor/model",
+        api_key="key",
+        transport=_RecordingTransport(response),
+    )
+
+    with pytest.raises(AdapterError, match="malformed"):
+        adapter.complete([])
+
+
+def test_openrouter_normalizes_structured_reasoning_text() -> None:
+    response = _openrouter_response(reasoning=None)
+    response["choices"][0]["message"]["reasoning_details"] = [
+        {"type": "reasoning.summary", "summary": "summary observation"},
+        {"type": "reasoning.text", "text": "first observation"},
+        {"type": "reasoning.text", "text": "second observation"},
+    ]
+    adapter = OpenRouterAdapter(
+        model="vendor/model",
+        api_key="key",
+        transport=_RecordingTransport(response),
+    )
 
     result = adapter.complete([])
 
-    assert result.reasoning is None
-    assert result.stop_reason == "unknown"
-    assert result.model is None
-    assert result.request_id is None
+    assert result.reasoning == "summary observation\nfirst observation\nsecond observation"
 
 
-def test_openrouter_default_transport_uses_urlopen(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_openrouter_accepts_documented_reasoning_content_alias() -> None:
+    response = _openrouter_response(reasoning=None)
+    response["choices"][0]["message"]["reasoning_content"] = "alias observation"
+    adapter = OpenRouterAdapter(
+        model="vendor/model",
+        api_key="key",
+        transport=_RecordingTransport(response),
+    )
+
+    result = adapter.complete([])
+
+    assert result.reasoning == "alias observation"
+
+
+def test_openrouter_default_transport_uses_redirect_rejecting_opener(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     class _Response:
         def __enter__(self) -> Self:
             return self
@@ -793,16 +840,23 @@ def test_openrouter_default_transport_uses_urlopen(monkeypatch: pytest.MonkeyPat
         def __exit__(self, *args: object) -> None:
             return None
 
-        def read(self) -> bytes:
+        def read(self, limit: int = -1) -> bytes:
+            assert limit > 0
             return json.dumps(_openrouter_response()).encode("utf-8")
 
     calls: list[tuple[Request, float]] = []
+    handlers: list[object] = []
 
-    def _fake_urlopen(request: Request, *, timeout: float) -> _Response:
-        calls.append((request, timeout))
-        return _Response()
+    class _Opener:
+        def open(self, request: Request, *, timeout: float) -> _Response:
+            calls.append((request, timeout))
+            return _Response()
 
-    monkeypatch.setattr(openrouter_module, "urlopen", _fake_urlopen)
+    def _fake_build_opener(*items: object) -> _Opener:
+        handlers.extend(items)
+        return _Opener()
+
+    monkeypatch.setattr(openrouter_module, "build_opener", _fake_build_opener)
     adapter = OpenRouterAdapter(model="vendor/model", api_key="key")
 
     result = adapter.complete([])
@@ -810,6 +864,26 @@ def test_openrouter_default_transport_uses_urlopen(monkeypatch: pytest.MonkeyPat
     assert result.text == "hello"
     assert len(calls) == 1
     assert calls[0][1] == 120.0
+    assert any(isinstance(handler, openrouter_module._RejectRedirects) for handler in handlers)
+
+
+def test_openrouter_redirect_handler_never_constructs_followup_request() -> None:
+    handler = openrouter_module._RejectRedirects()
+    original = Request(
+        "https://openrouter.ai/api/v1/chat/completions",
+        headers={"Authorization": "Bearer test-secret"},
+    )
+
+    redirected = handler.redirect_request(
+        original,
+        None,
+        302,
+        "Found",
+        Message(),
+        "https://evil.example/capture",
+    )
+
+    assert redirected is None
 
 
 def test_mappers_tolerate_missing_model_and_request_id() -> None:

@@ -17,9 +17,12 @@ class RunReport(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    schema_version: Literal[1] = 1
+    schema_version: Literal[2] = 2
     probe_id: str
     model: str
+    backend: str
+    requested_model: str | None
+    variant: Literal["fault", "control"]
     seed: int
     outcome: str
     report_text: str | None
@@ -48,11 +51,13 @@ class RunReport(BaseModel):
 
 def build_report(
     probe: LoadedProbe,
-    model: str,
+    *,
+    backend: str,
+    requested_model: str | None,
+    variant: Literal["fault", "control"],
     seed: int,
     outcome: LoopOutcome,
     budget_snapshot: dict[str, int],
-    *,
     predicates: dict[str, bool] | None = None,
 ) -> RunReport:
     """Assemble a RunReport from the probe identity, outcome, and budget totals.
@@ -65,7 +70,10 @@ def build_report(
     passed: bool | None = all(scored.values()) if predicates is not None else None
     return RunReport(
         probe_id=probe.manifest.id,
-        model=model,
+        model=backend if requested_model is None else f"{backend}:{requested_model}",
+        backend=backend,
+        requested_model=requested_model,
+        variant=variant,
         seed=seed,
         outcome=outcome.status,
         report_text=outcome.report_text,

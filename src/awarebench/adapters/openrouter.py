@@ -7,7 +7,7 @@ import os
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any, Final
 from urllib.error import HTTPError
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from awarebench.adapters.base import (
     AdapterError,
@@ -18,16 +18,35 @@ from awarebench.adapters.base import (
 
 OPENROUTER_ENDPOINT: Final[str] = "https://openrouter.ai/api/v1/chat/completions"
 DEFAULT_TIMEOUT_S: Final[float] = 120.0
+MAX_RESPONSE_BYTES: Final[int] = 8 * 1024 * 1024
 
 Transport = Callable[[Request, float], bytes]
 
 
+class _RejectRedirects(HTTPRedirectHandler):
+    """Keep bearer credentials on the one configured OpenRouter origin."""
+
+    def redirect_request(
+        self,
+        req: Request,
+        fp: Any,
+        code: int,
+        msg: str,
+        headers: Any,
+        newurl: str,
+    ) -> Any:
+        del req, fp, code, msg, headers, newurl
+
+
 def _default_transport(request: Request, timeout: float) -> bytes:
     """Send one request and return its raw response body."""
-    with urlopen(request, timeout=timeout) as response:
-        body = response.read()
+    opener = build_opener(_RejectRedirects())
+    with opener.open(request, timeout=timeout) as response:
+        body = response.read(MAX_RESPONSE_BYTES + 1)
     if not isinstance(body, bytes):
         raise AdapterError("openrouter transport returned a non-bytes response")
+    if len(body) > MAX_RESPONSE_BYTES:
+        raise AdapterError("openrouter response exceeded size limit")
     return body
 
 
@@ -43,9 +62,47 @@ def _required(mapping: Mapping[str, Any], key: str, label: str) -> Any:
     return mapping[key]
 
 
-def _optional_str(mapping: Mapping[str, Any], key: str) -> str | None:
-    value = mapping.get(key)
-    return value if isinstance(value, str) else None
+def _required_str(mapping: Mapping[str, Any], key: str, label: str) -> str:
+    value = _required(mapping, key, label)
+    if not isinstance(value, str) or not value:
+        raise AdapterError(f"malformed openrouter response: {label}.{key} must be a string")
+    return value
+
+
+def _reasoning_text(message: Mapping[str, Any]) -> str | None:
+    reasoning = message.get("reasoning")
+    if reasoning is None:
+        reasoning = message.get("reasoning_content")
+    if reasoning is not None:
+        if not isinstance(reasoning, str):
+            raise AdapterError("malformed openrouter response: message.reasoning must be a string")
+        return reasoning
+    details = message.get("reasoning_details")
+    if details is None:
+        return None
+    if not isinstance(details, list):
+        raise AdapterError(
+            "malformed openrouter response: message.reasoning_details must be a list"
+        )
+    texts: list[str] = []
+    for index, raw_detail in enumerate(details):
+        detail = _mapping(raw_detail, f"message.reasoning_details[{index}]")
+        detail_type = detail.get("type")
+        if detail_type == "reasoning.text":
+            value = detail.get("text")
+        elif detail_type == "reasoning.summary":
+            value = detail.get("summary")
+        elif detail_type == "reasoning.encrypted":
+            continue
+        else:
+            raise AdapterError("malformed openrouter response: unknown reasoning detail type")
+        if not isinstance(value, str):
+            raise AdapterError(
+                "malformed openrouter response: reasoning detail content must be a string"
+            )
+        if value:
+            texts.append(value)
+    return "\n".join(texts) or None
 
 
 class OpenRouterAdapter:
@@ -113,28 +170,48 @@ class OpenRouterAdapter:
     @staticmethod
     def _map_response(payload: Any) -> AdapterResponse:
         root = _mapping(payload, "root")
+        if _required_str(root, "object", "root") != "chat.completion":
+            raise AdapterError("malformed openrouter response: root.object must be chat.completion")
+        response_model = _required_str(root, "model", "root")
+        request_id = _required_str(root, "id", "root")
         choices = _required(root, "choices", "root")
         if not isinstance(choices, list) or not choices:
             raise AdapterError("malformed openrouter response: choices must be a non-empty list")
         choice = _mapping(choices[0], "choices[0]")
+        choice_index = _required(choice, "index", "choices[0]")
+        if isinstance(choice_index, bool) or not isinstance(choice_index, int) or choice_index != 0:
+            raise AdapterError("malformed openrouter response: choices[0].index must be 0")
+        finish_reason = _required_str(choice, "finish_reason", "choices[0]")
         message = _mapping(_required(choice, "message", "choices[0]"), "message")
+        if _required_str(message, "role", "message") != "assistant":
+            raise AdapterError("malformed openrouter response: message.role must be assistant")
         text = _required(message, "content", "message")
         if not isinstance(text, str):
             raise AdapterError("malformed openrouter response: message.content must be a str")
-        reasoning = _optional_str(message, "reasoning")
+        reasoning = _reasoning_text(message)
         usage = _mapping(_required(root, "usage", "root"), "usage")
+        prompt_tokens = _require_token(
+            _required(usage, "prompt_tokens", "usage"),
+            "usage.prompt_tokens",
+        )
+        completion_tokens = _require_token(
+            _required(usage, "completion_tokens", "usage"),
+            "usage.completion_tokens",
+        )
+        total_tokens = _require_token(
+            _required(usage, "total_tokens", "usage"),
+            "usage.total_tokens",
+        )
+        if total_tokens != prompt_tokens + completion_tokens:
+            raise AdapterError(
+                "malformed openrouter response: usage.total_tokens does not match components"
+            )
         return AdapterResponse(
             text=text,
             reasoning=reasoning,
-            prompt_tokens=_require_token(
-                _required(usage, "prompt_tokens", "usage"),
-                "usage.prompt_tokens",
-            ),
-            completion_tokens=_require_token(
-                _required(usage, "completion_tokens", "usage"),
-                "usage.completion_tokens",
-            ),
-            stop_reason=_normalize_stop_reason(choice.get("finish_reason")),
-            model=_optional_str(root, "model"),
-            request_id=_optional_str(root, "id"),
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            stop_reason=_normalize_stop_reason(finish_reason),
+            model=response_model,
+            request_id=request_id,
         )

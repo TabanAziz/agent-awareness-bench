@@ -59,7 +59,7 @@ jobs:
               code = main(['run', 'probes/futile-loop/progress-plateau',
                            '--model', 'stub', '--seed', '0', '--out', str(out)])
               assert code == 0, f'run {i} failed with exit {code}'
-              trace = (out / 'progress-plateau' / 'stub-s0' / 'events.jsonl').read_text(encoding='utf-8')
+              trace = (out / 'progress-plateau' / 'stub-fault-s0' / 'events.jsonl').read_text(encoding='utf-8')
               results.append(trace)
           if results[0] != results[1]:
               print('DETERMINISM VIOLATION: event logs differ between identical runs')

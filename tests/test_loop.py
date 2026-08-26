@@ -159,6 +159,25 @@ class _RecordingScriptAdapter:
         )
 
 
+class _ReasoningAdapter:
+    def complete(
+        self,
+        messages: Sequence[dict[str, str]],
+        *,
+        temperature: float = 0.0,
+        max_tokens: int | None = None,
+    ) -> AdapterResponse:
+        return AdapterResponse(
+            text=_FINAL_REPORT,
+            reasoning="the counter is frozen while liveness advances",
+            prompt_tokens=10,
+            completion_tokens=5,
+            stop_reason="stop",
+            model="vendor/model",
+            request_id="gen_1",
+        )
+
+
 def _events_of_type(log: EventLog, event_type: str) -> list[Any]:
     return [event for event in log if event.type == event_type]
 
@@ -239,6 +258,31 @@ def test_prompt_token_counts_strictly_increase_across_tool_cycles(tmp_path: Path
     ]
     assert len(counts) == 5
     assert all(left < right for left, right in pairwise(counts))
+
+
+def test_model_reasoning_is_preserved_in_event_log(tmp_path: Path) -> None:
+    stack = _Stack(tmp_path, [_FINAL_REPORT])
+
+    outcome = stack.new_loop(_ReasoningAdapter(), max_cycles=1).run()
+
+    assert outcome.status == "reported"
+    [model_event] = _events_of_type(stack.log, EventType.MODEL_MESSAGE)
+    assert model_event.payload["reasoning"] == "the counter is frozen while liveness advances"
+
+
+def test_malformed_assistant_reply_precedes_nudge_in_next_request(tmp_path: Path) -> None:
+    malformed = "oops, not json"
+    responses = [malformed, _FINAL_REPORT]
+    stack = _Stack(tmp_path, responses, max_cycles=2)
+    adapter = _RecordingScriptAdapter(responses)
+
+    outcome = stack.new_loop(adapter, max_cycles=2).run()
+
+    assert outcome.status == "reported"
+    assert adapter.calls[1][1:] == [
+        {"role": "assistant", "content": malformed},
+        {"role": "user", "content": NUDGE_TEXT},
+    ]
 
 
 def test_malformed_turns_consume_cycles_and_nudge(tmp_path: Path) -> None:

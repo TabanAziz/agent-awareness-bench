@@ -1,13 +1,14 @@
 """Command-line entry point: run probes end to end.
 
-Exit codes: 0 for any completed run regardless of probe outcome, 2 when the
-probe loader rejects the manifest (ProbeGateError) or usage is invalid, 3 for
-unexpected exceptions (traceback on stderr).
+Exit codes: 0 for a completed harness run, 2 when the probe loader rejects the
+manifest (ProbeGateError), usage is invalid, or the target run already exists;
+3 for unexpected exceptions (traceback on stderr); 4 for adapter failure.
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
 import re
 import sys
@@ -191,6 +192,13 @@ def _run_command(args: argparse.Namespace) -> int:
     for role, content in parts.seed_messages:
         context.add(role, content)
 
+    out_dir = args.out / loaded.manifest.id / _run_label(backend, model_id, args.variant, args.seed)
+    try:
+        out_dir.mkdir(parents=True, exist_ok=False)
+    except FileExistsError:
+        print(f"run output already exists: {out_dir}", file=sys.stderr)
+        return 2
+
     adapter = _build_adapter(args, backend=backend, model_id=model_id)
     outcome = AgentLoop(
         probe=loaded,
@@ -208,17 +216,23 @@ def _run_command(args: argparse.Namespace) -> int:
 
     snapshot = budget.snapshot()
     score = evaluate(loaded, log, control=args.variant == "control")
-    out_dir = args.out / loaded.manifest.id / _safe_run_label(args.model, args.seed)
     log.write_jsonl(out_dir / "events.jsonl")
-    build_report(loaded, args.model, args.seed, outcome, snapshot, predicates=score).write_json(
-        out_dir / "report.json"
-    )
+    build_report(
+        loaded,
+        backend=backend,
+        requested_model=model_id,
+        variant=args.variant,
+        seed=args.seed,
+        outcome=outcome,
+        budget_snapshot=snapshot,
+        predicates=score,
+    ).write_json(out_dir / "report.json")
     print(
         f"outcome={outcome.status} cycles={outcome.cycles_used} "
         f"tokens={snapshot['prompt_tokens']}+{snapshot['completion_tokens']} "
         f"passed={all_predicates_pass(score)}"
     )
-    return 0
+    return 4 if outcome.status == "adapter_failed" else 0
 
 
 def _parse_model_spec(model: str, model_name: str | None) -> tuple[str, str | None]:
@@ -258,11 +272,16 @@ def _build_adapter(
     raise ValueError(f"unsupported adapter backend: {backend}")
 
 
-def _safe_run_label(model_spec: str, seed: int) -> str:
-    """Return a stable path component for a model spec and seed."""
+def _run_label(backend: str, model_id: str | None, variant: str, seed: int) -> str:
+    """Return a bounded, collision-resistant path component for one run."""
+    if backend == "stub" and model_id is None:
+        return f"stub-{variant}-s{seed}"
+    model_spec = backend if model_id is None else f"{backend}:{model_id}"
     safe_model = re.sub(r"[^A-Za-z0-9._-]+", "-", model_spec)
     safe_model = re.sub(r"-+", "-", safe_model).strip("-.") or "model"
-    return f"{safe_model}-s{seed}"
+    prefix = safe_model[:48].rstrip("-.") or "model"
+    digest = hashlib.sha256(model_spec.encode("utf-8")).hexdigest()[:12]
+    return f"{prefix}-{digest}-{variant}-s{seed}"
 
 
 def _read_stub_script(path: Path | None) -> list[str]:
