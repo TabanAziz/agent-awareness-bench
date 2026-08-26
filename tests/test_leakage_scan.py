@@ -5,7 +5,7 @@ from __future__ import annotations
 import importlib.util
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from unittest.mock import patch
 
 import pytest
@@ -38,11 +38,15 @@ def _write_probe(
     delayed_command_call: int = 2,
     post_handler_text: str | None = None,
     seed_message: str | None = None,
+    seed_role: str = "user",
     http_body: str | None = None,
+    http_timestamp: int = 1,
     source_literal: str | None = None,
     with_runtime_surfaces: bool = True,
     cross_handler_leak: bool = False,
+    cutover_mutator_calls: int | None = None,
     own_fortieth_handler_leak: bool = False,
+    fake_success: bool = False,
     clock_threshold_leak: bool = False,
     assert_clock_cycle_alignment: bool = False,
 ) -> Path:
@@ -104,6 +108,20 @@ def _write_probe(
             "    parts.command_handlers['a_read'] = a_read\n"
             "    parts.command_handlers['z_read'] = z_read\n"
         )
+    elif with_runtime_surfaces and cutover_mutator_calls is not None:
+        applier += (
+            f"    parts.fs.write({runtime_filename_expression}, {runtime_expression})\n"
+            "    state = {'mutations': 0}\n"
+            "    def a_mutate(command):\n"
+            "        state['mutations'] += 1\n"
+            "        return 0, 'all clear'\n"
+            "    def b_read(command):\n"
+            f"        if state['mutations'] == {cutover_mutator_calls}:\n"
+            f"            return 0, {_encoded_expression('benchmark')}\n"
+            "        return 0, 'all clear'\n"
+            "    parts.command_handlers['a_mutate'] = a_mutate\n"
+            "    parts.command_handlers['b_read'] = b_read\n"
+        )
     elif with_runtime_surfaces:
         applier += (
             f"    parts.fs.write({runtime_filename_expression}, {runtime_expression})\n"
@@ -132,12 +150,18 @@ def _write_probe(
         applier += "        return 0, output\n    parts.command_handlers['status'] = status\n"
     if seed_message is not None:
         applier += (
-            f"    parts.seed_messages.append(('user', {_encoded_expression(seed_message)}))\n"
+            "    parts.seed_messages.append("
+            f"({_encoded_expression(seed_role)}, {_encoded_expression(seed_message)}))\n"
         )
     if http_body is not None:
         applier += (
             "    parts.http_table['https://status.test'] = "
-            f"[({_encoded_expression(http_body)}, 1)]\n"
+            f"[({_encoded_expression(http_body)}, {http_timestamp})]\n"
+        )
+    if fake_success:
+        applier += (
+            "    from awarebench.harness.tools import FaultSet\n"
+            "    parts.faults = FaultSet(fake_success_commands=('status',))\n"
         )
     if not with_runtime_surfaces and seed_message is None and http_body is None:
         applier += "    pass\n"
@@ -267,6 +291,28 @@ def test_round_robin_scheduler_rescans_handlers_after_shared_state_changes(
     assert "command=a_read" in capsys.readouterr().err
 
 
+def test_cutover_schedule_catches_twenty_one_mutations_then_a_read(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    scanner = _load_scanner()
+    probes_root = _write_probe(tmp_path, cutover_mutator_calls=21).parents[1]
+
+    assert scanner.main([str(probes_root)]) == 1
+
+    assert "command=b_read" in capsys.readouterr().err
+
+
+def test_cutover_schedule_catches_transient_boundary_state(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    scanner = _load_scanner()
+    probes_root = _write_probe(tmp_path, cutover_mutator_calls=39).parents[1]
+
+    assert scanner.main([str(probes_root)]) == 1
+
+    assert "command=b_read" in capsys.readouterr().err
+
+
 def test_each_handler_is_sampled_through_its_fortieth_call(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -323,6 +369,51 @@ def test_runtime_surfaces_reject_local_paths(
     assert scanner.main([str(probes_root)]) == 1
 
     assert "local_path" in capsys.readouterr().err
+
+
+def test_fake_success_hides_unexecuted_handler_output_from_the_scanner(tmp_path: Path) -> None:
+    scanner = _load_scanner()
+    probes_root = _write_probe(tmp_path, command_text="benchmark", fake_success=True).parents[1]
+
+    assert scanner.main([str(probes_root)]) == 0
+
+
+def test_seed_roles_are_scanned_as_agent_visible_data(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    scanner = _load_scanner()
+    probes_root = _write_probe(tmp_path, seed_message="all clear", seed_role="benchmark").parents[1]
+
+    assert scanner.main([str(probes_root)]) == 1
+
+    assert "seed-message" in capsys.readouterr().err
+
+
+def test_runtime_values_are_scanned_in_their_wire_serialization(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    scanner = _load_scanner()
+    probes_root = _write_probe(
+        tmp_path,
+        seed_message="all clear",
+        seed_role="system",
+        http_body="all clear",
+        http_timestamp=17,
+    ).parents[1]
+    observed: list[str] = []
+    original_check = scanner._check_text
+
+    def record(text: str, *args: Any, **kwargs: Any) -> list[str]:
+        observed.append(text)
+        return cast(list[str], original_check(text, *args, **kwargs))
+
+    monkeypatch.setattr(scanner, "_check_text", record)
+
+    assert scanner.main([str(probes_root)]) == 0
+
+    assert repr({"role": "system", "content": "all clear"}) in observed
+    assert repr(("all clear", 17)) in observed
+    assert repr((0, "all clear")) in observed
 
 
 @pytest.mark.parametrize(
@@ -445,7 +536,7 @@ def test_parent_name_matching_repository_name_is_not_an_identity_leak(
     assert scanner.main([str(root)]) == 0
 
 
-@pytest.mark.parametrize("encoding", ["utf-8-sig", "utf-16"])
+@pytest.mark.parametrize("encoding", ["utf-8-sig", "utf-16", "utf-16-le"])
 def test_bom_encoded_local_path_is_scanned(
     tmp_path: Path, encoding: str, capsys: pytest.CaptureFixture[str]
 ) -> None:

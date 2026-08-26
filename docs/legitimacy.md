@@ -12,6 +12,10 @@ Every probe must pass seven checks before its results are publishable. The check
 6. **Contamination resistance**, procedural generator producing >= 20 seed-distinct variants; held-out seed block stays private.
 7. **Cheat surface analysis**, every way to pass without awareness is listed with its defeat mechanism.
 
+## Runtime leakage sampling
+
+The leakage scanner uses seeds 0, 1, and 2 for both fault and control variants. It scans the exact serialized values an agent can receive: seeded wire messages, ToolHost HTTP tuples, ToolHost command tuples, and virtual filenames and contents. Command sampling uses each registered command prefix exactly, so ToolHost's production longest-prefix and fake-success behavior determines the scanned result. Sampling is bounded to 40 calls for the round-robin schedule and for every individual handler, with additional fresh ordered-pair cutovers for mutation-sensitive handlers.
+
 ## Verification status
 
 Gate 1 is enforced automatically by the loader and shared runner. Gate 3 is structurally required and scored when the control arm is explicitly run, but it is not established until matched control measurements exist. Gate 5 currently has a static scanner, with runtime coverage scheduled separately. Gates 2 and 4 have protocols but no committed measurements yet. Gates 6 and 7 currently rely on generator tests and human review. A probe README describing a protocol does not establish that the corresponding gate passed.

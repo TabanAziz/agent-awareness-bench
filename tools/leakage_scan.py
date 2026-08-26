@@ -14,10 +14,11 @@ import yaml
 
 from awarebench.cli import _build_stack
 from awarebench.events import EventLog
+from awarebench.harness.budget import BudgetAccountant
 from awarebench.harness.clock import CycleCounter, VirtualClock
 from awarebench.harness.loop import DEFAULT_CYCLE_STEP_US
 from awarebench.harness.stack import StackParts
-from awarebench.harness.tools import CommandHandler
+from awarebench.harness.tools import ToolHost
 from awarebench.probes.loader import ProbeGateError, load_probe
 
 SEEDS: Final[tuple[int, ...]] = (0, 1, 2)
@@ -145,16 +146,31 @@ def _scan_local_paths(root: Path, result: ScanResult) -> None:
 
 
 def _decode_repository_text(path: Path) -> str | None:
-    """Decode UTF-8 and BOM-marked UTF-16 text; return None for opaque binary data."""
+    """Decode UTF-8 and BOM or NUL-patterned UTF-16; skip opaque binary data."""
     data = path.read_bytes()
     if data.startswith(b"\xef\xbb\xbf"):
         return data.decode("utf-8-sig")
     if data.startswith((b"\xff\xfe", b"\xfe\xff")):
         return data.decode("utf-16")
+    if _looks_like_utf16_without_bom(data):
+        encoding = "utf-16-le" if data[1::2].count(0) >= data[::2].count(0) else "utf-16-be"
+        try:
+            return data.decode(encoding)
+        except UnicodeDecodeError:
+            return None
     try:
         return data.decode("utf-8")
     except UnicodeDecodeError:
         return None
+
+
+def _looks_like_utf16_without_bom(data: bytes) -> bool:
+    """Identify interleaved-NUL UTF-16 before permissive UTF-8 decoding."""
+    if len(data) < 4 or len(data) % 2:
+        return False
+    even = data[::2]
+    odd = data[1::2]
+    return even.count(0) * 2 >= len(even) or odd.count(0) * 2 >= len(odd)
 
 
 def _task_text(manifest_path: Path) -> str:
@@ -213,48 +229,86 @@ def _scan_environment(
 ) -> None:
     """Scan one seed/variant through shared and per-handler fresh schedules."""
     result.environments_inspected += 1
-    parts, clock, cycles = _instantiate_stack(probe_dir, seed, variant, result)
-    handlers = sorted(parts.command_handlers.items())
+    parts, log, clock, cycles = _instantiate_stack(probe_dir, seed, variant, result)
+    handlers = sorted(parts.command_handlers)
     _scan_schedule(
         root,
         probe_dir,
         seed,
         variant,
         parts,
+        log,
         clock,
         cycles,
         "round-robin",
-        handlers,
+        tuple(handlers[index % len(handlers)] for index in range(HANDLER_OUTPUT_SAMPLES))
+        if handlers
+        else (),
         result,
     )
 
-    for command, _handler in handlers:
-        fresh_parts, fresh_clock, fresh_cycles = _instantiate_stack(
+    for command in handlers:
+        fresh_parts, fresh_log, fresh_clock, fresh_cycles = _instantiate_stack(
             probe_dir, seed, variant, result
         )
-        fresh_handler = fresh_parts.command_handlers.get(command)
-        if fresh_handler is None:
-            raise ScanError(
-                f"cannot inspect {probe_dir} ({variant}, seed {seed}): "
-                f"handler {command!r} is absent from its fresh schedule"
-            )
+        _require_handlers(fresh_parts, (command,), probe_dir, variant, seed)
         _scan_schedule(
             root,
             probe_dir,
             seed,
             variant,
             fresh_parts,
+            fresh_log,
             fresh_clock,
             fresh_cycles,
             f"handler={command}",
-            [(command, fresh_handler)],
+            (command,) * HANDLER_OUTPUT_SAMPLES,
             result,
         )
+
+    for mutator in handlers:
+        for reader in handlers:
+            if mutator == reader:
+                continue
+            for cutover in range(1, HANDLER_OUTPUT_SAMPLES):
+                fresh_parts, fresh_log, fresh_clock, fresh_cycles = _instantiate_stack(
+                    probe_dir, seed, variant, result
+                )
+                _require_handlers(fresh_parts, (mutator, reader), probe_dir, variant, seed)
+                _scan_schedule(
+                    root,
+                    probe_dir,
+                    seed,
+                    variant,
+                    fresh_parts,
+                    fresh_log,
+                    fresh_clock,
+                    fresh_cycles,
+                    f"cutover={mutator}-to-{reader} k={cutover}",
+                    (mutator,) * cutover + (reader,),
+                    result,
+                )
+
+
+def _require_handlers(
+    parts: StackParts,
+    required: tuple[str, ...],
+    probe_dir: Path,
+    variant: str,
+    seed: int,
+) -> None:
+    """Fail closed if a fresh schedule lacks a handler discovered initially."""
+    for command in required:
+        if command not in parts.command_handlers:
+            raise ScanError(
+                f"cannot inspect {probe_dir} ({variant}, seed {seed}): "
+                f"handler {command!r} is absent from its fresh schedule"
+            )
 
 
 def _instantiate_stack(
     probe_dir: Path, seed: int, variant: str, result: ScanResult
-) -> tuple[StackParts, VirtualClock, CycleCounter]:
+) -> tuple[StackParts, EventLog, VirtualClock, CycleCounter]:
     """Build one fresh runtime stack and record the actual instantiation."""
     try:
         loaded = load_probe(probe_dir)
@@ -266,7 +320,7 @@ def _instantiate_stack(
         raise ScanError(f"cannot instantiate {probe_dir} ({variant}, seed {seed}): {exc}") from exc
 
     result.stack_instantiations += 1
-    return parts, clock, cycles
+    return parts, log, clock, cycles
 
 
 def _scan_schedule(
@@ -275,32 +329,40 @@ def _scan_schedule(
     seed: int,
     variant: str,
     parts: StackParts,
+    log: EventLog,
     clock: VirtualClock,
     cycles: CycleCounter,
     schedule: str,
-    handlers: list[tuple[str, CommandHandler]],
+    commands: tuple[str, ...],
     result: ScanResult,
 ) -> None:
-    """Scan a bounded command schedule and the fresh stack it owns."""
+    """Scan one fresh stack through exact ToolHost-visible values."""
     result.schedules_inspected += 1
     source = f"{probe_dir} [runtime {variant} seed={seed} schedule={schedule}]"
     patterns = _agent_visible_patterns(root)
     surfaces_inspected = 0
+    host = ToolHost(
+        event_log=log,
+        clock=clock,
+        cycles=cycles,
+        budget=BudgetAccountant(),
+        fs=parts.fs,
+        faults=parts.faults,
+        command_handlers=parts.command_handlers,
+        http_table=parts.http_table,
+        host_name="leakage-scan",
+    )
 
-    for message_index, (_role, content) in enumerate(parts.seed_messages, start=1):
+    for message_index, (role, content) in enumerate(parts.seed_messages, start=1):
         result.seed_messages_inspected += 1
         surfaces_inspected += 1
         result.leaks.extend(
-            _check_text(content, f"{source} seed-message={message_index}", patterns)
-        )
-
-    for url, versions in sorted(parts.http_table.items()):
-        for version_index, (body, _last_modified) in enumerate(versions, start=1):
-            result.http_bodies_inspected += 1
-            surfaces_inspected += 1
-            result.leaks.extend(
-                _check_text(body, f"{source} http={url} version={version_index}", patterns)
+            _check_text(
+                repr({"role": role, "content": content}),
+                f"{source} seed-message={message_index}",
+                patterns,
             )
+        )
 
     def scan_virtual_files(state: str) -> None:
         nonlocal surfaces_inspected
@@ -316,24 +378,39 @@ def _scan_schedule(
 
     scan_virtual_files("initial")
 
-    for cycle_index in range(HANDLER_OUTPUT_SAMPLES):
-        if not handlers:
-            break
-        command, handler = handlers[cycle_index % len(handlers)]
+    def advance() -> None:
         cycles.advance()
         clock.advance_us(DEFAULT_CYCLE_STEP_US)
+
+    for url in sorted(parts.http_table):
+        advance()
         try:
-            _exit_code, output = handler(command)
+            response = host.http_get(url)
+        except Exception as exc:
+            raise ScanError(
+                f"cannot inspect HTTP output for {probe_dir} "
+                f"({variant}, seed {seed}, url {url}): {exc}"
+            ) from exc
+        result.http_bodies_inspected += 1
+        surfaces_inspected += 1
+        result.leaks.extend(_check_text(repr(response), f"{source} http={url}", patterns))
+        result.virtual_state_rescans += 1
+        scan_virtual_files(f"after-http={url}")
+
+    for step, command in enumerate(commands, start=1):
+        advance()
+        try:
+            response = host.run_command(command)
         except Exception as exc:
             raise ScanError(
                 f"cannot inspect command output for {probe_dir} "
-                f"({variant}, seed {seed}, cycle {cycle_index + 1}, {command}): {exc}"
+                f"({variant}, seed {seed}, step {step}, {command}): {exc}"
             ) from exc
         result.command_outputs_inspected += 1
         surfaces_inspected += 1
-        result.leaks.extend(_check_text(output, f"{source} command={command}", patterns))
+        result.leaks.extend(_check_text(repr(response), f"{source} command={command}", patterns))
         result.virtual_state_rescans += 1
-        scan_virtual_files(f"after-cycle={cycle_index + 1} command={command}")
+        scan_virtual_files(f"after-step={step} command={command}")
 
     if surfaces_inspected == 0:
         raise ScanError(
