@@ -42,6 +42,7 @@ def _write_probe(
     source_literal: str | None = None,
     with_runtime_surfaces: bool = True,
     cross_handler_leak: bool = False,
+    own_fortieth_handler_leak: bool = False,
     clock_threshold_leak: bool = False,
     assert_clock_cycle_alignment: bool = False,
 ) -> Path:
@@ -88,6 +89,20 @@ def _write_probe(
             "        return 0, 'all clear'\n"
             "    parts.command_handlers['a_read'] = a_read\n"
             "    parts.command_handlers['z_mutate'] = z_mutate\n"
+        )
+    elif with_runtime_surfaces and own_fortieth_handler_leak:
+        applier += (
+            f"    parts.fs.write({runtime_filename_expression}, {runtime_expression})\n"
+            "    state = {'a_calls': 0}\n"
+            "    def a_read(command):\n"
+            "        state['a_calls'] += 1\n"
+            "        if state['a_calls'] == 40:\n"
+            f"            return 0, {_encoded_expression('benchmark')}\n"
+            "        return 0, 'all clear'\n"
+            "    def z_read(command):\n"
+            "        return 0, 'all clear'\n"
+            "    parts.command_handlers['a_read'] = a_read\n"
+            "    parts.command_handlers['z_read'] = z_read\n"
         )
     elif with_runtime_surfaces:
         applier += (
@@ -193,10 +208,12 @@ def test_runtime_files_and_command_outputs_are_scanned_for_every_seed(tmp_path: 
     assert result.files_inspected > 0
     assert result.probes_inspected == 1
     assert result.environments_inspected == 6
-    assert result.virtual_filenames_inspected == 246
-    assert result.runtime_files_inspected == 246
-    assert result.virtual_state_rescans == 240
-    assert result.command_outputs_inspected == 240
+    assert result.stack_instantiations == 12
+    assert result.schedules_inspected == 12
+    assert result.virtual_filenames_inspected == 492
+    assert result.runtime_files_inspected == 492
+    assert result.virtual_state_rescans == 480
+    assert result.command_outputs_inspected == 480
     assert result.leaks == []
 
 
@@ -244,6 +261,17 @@ def test_round_robin_scheduler_rescans_handlers_after_shared_state_changes(
 ) -> None:
     scanner = _load_scanner()
     probes_root = _write_probe(tmp_path, cross_handler_leak=True).parents[1]
+
+    assert scanner.main([str(probes_root)]) == 1
+
+    assert "command=a_read" in capsys.readouterr().err
+
+
+def test_each_handler_is_sampled_through_its_fortieth_call(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    scanner = _load_scanner()
+    probes_root = _write_probe(tmp_path, own_fortieth_handler_leak=True).parents[1]
 
     assert scanner.main([str(probes_root)]) == 1
 

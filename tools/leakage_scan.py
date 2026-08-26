@@ -16,6 +16,8 @@ from awarebench.cli import _build_stack
 from awarebench.events import EventLog
 from awarebench.harness.clock import CycleCounter, VirtualClock
 from awarebench.harness.loop import DEFAULT_CYCLE_STEP_US
+from awarebench.harness.stack import StackParts
+from awarebench.harness.tools import CommandHandler
 from awarebench.probes.loader import ProbeGateError, load_probe
 
 SEEDS: Final[tuple[int, ...]] = (0, 1, 2)
@@ -67,6 +69,8 @@ class ScanResult:
     files_inspected: int = 0
     probes_inspected: int = 0
     environments_inspected: int = 0
+    stack_instantiations: int = 0
+    schedules_inspected: int = 0
     seed_messages_inspected: int = 0
     http_bodies_inspected: int = 0
     virtual_filenames_inspected: int = 0
@@ -207,7 +211,51 @@ def _scan_environment(
     variant: str,
     result: ScanResult,
 ) -> None:
-    """Construct one agent-visible environment and scan its files and commands."""
+    """Scan one seed/variant through shared and per-handler fresh schedules."""
+    result.environments_inspected += 1
+    parts, clock, cycles = _instantiate_stack(probe_dir, seed, variant, result)
+    handlers = sorted(parts.command_handlers.items())
+    _scan_schedule(
+        root,
+        probe_dir,
+        seed,
+        variant,
+        parts,
+        clock,
+        cycles,
+        "round-robin",
+        handlers,
+        result,
+    )
+
+    for command, _handler in handlers:
+        fresh_parts, fresh_clock, fresh_cycles = _instantiate_stack(
+            probe_dir, seed, variant, result
+        )
+        fresh_handler = fresh_parts.command_handlers.get(command)
+        if fresh_handler is None:
+            raise ScanError(
+                f"cannot inspect {probe_dir} ({variant}, seed {seed}): "
+                f"handler {command!r} is absent from its fresh schedule"
+            )
+        _scan_schedule(
+            root,
+            probe_dir,
+            seed,
+            variant,
+            fresh_parts,
+            fresh_clock,
+            fresh_cycles,
+            f"handler={command}",
+            [(command, fresh_handler)],
+            result,
+        )
+
+
+def _instantiate_stack(
+    probe_dir: Path, seed: int, variant: str, result: ScanResult
+) -> tuple[StackParts, VirtualClock, CycleCounter]:
+    """Build one fresh runtime stack and record the actual instantiation."""
     try:
         loaded = load_probe(probe_dir)
         log = EventLog()
@@ -217,8 +265,25 @@ def _scan_environment(
     except (ImportError, OSError, ProbeGateError, RuntimeError, ValueError) as exc:
         raise ScanError(f"cannot instantiate {probe_dir} ({variant}, seed {seed}): {exc}") from exc
 
-    result.environments_inspected += 1
-    source = f"{probe_dir} [runtime {variant} seed={seed}]"
+    result.stack_instantiations += 1
+    return parts, clock, cycles
+
+
+def _scan_schedule(
+    root: Path,
+    probe_dir: Path,
+    seed: int,
+    variant: str,
+    parts: StackParts,
+    clock: VirtualClock,
+    cycles: CycleCounter,
+    schedule: str,
+    handlers: list[tuple[str, CommandHandler]],
+    result: ScanResult,
+) -> None:
+    """Scan a bounded command schedule and the fresh stack it owns."""
+    result.schedules_inspected += 1
+    source = f"{probe_dir} [runtime {variant} seed={seed} schedule={schedule}]"
     patterns = _agent_visible_patterns(root)
     surfaces_inspected = 0
 
@@ -251,7 +316,6 @@ def _scan_environment(
 
     scan_virtual_files("initial")
 
-    handlers = sorted(parts.command_handlers.items())
     for cycle_index in range(HANDLER_OUTPUT_SAMPLES):
         if not handlers:
             break
@@ -272,7 +336,10 @@ def _scan_environment(
         scan_virtual_files(f"after-cycle={cycle_index + 1} command={command}")
 
     if surfaces_inspected == 0:
-        raise ScanError(f"{probe_dir} ({variant}, seed {seed}) exposed zero agent-visible surfaces")
+        raise ScanError(
+            f"{probe_dir} ({variant}, seed {seed}, schedule {schedule}) "
+            "exposed zero agent-visible surfaces"
+        )
 
 
 def _scan_probe(root: Path, probe_dir: Path, result: ScanResult) -> None:
@@ -308,6 +375,8 @@ def _report_counts(result: ScanResult, *, stream: TextIO) -> None:
         "inspected "
         f"{result.files_inspected} files, {result.probes_inspected} probes, "
         f"{result.environments_inspected} environments, "
+        f"{result.stack_instantiations} stack instantiations, "
+        f"{result.schedules_inspected} schedules, "
         f"{result.seed_messages_inspected} seed messages, "
         f"{result.http_bodies_inspected} HTTP bodies, "
         f"{result.virtual_filenames_inspected} virtual filenames, "
