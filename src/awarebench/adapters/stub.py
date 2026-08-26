@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from awarebench.adapters.base import AdapterResponse
+from awarebench.adapters.base import AdapterMessage, AdapterResponse, message_token_text
 
 
 class StubAdapter:
@@ -30,7 +30,7 @@ class StubAdapter:
 
     def complete(
         self,
-        messages: Sequence[dict[str, str]],
+        messages: Sequence[AdapterMessage],
         *,
         temperature: float = 0.0,
         max_tokens: int | None = None,
@@ -43,7 +43,15 @@ class StubAdapter:
             self._cursor += 1
         else:
             text = self._responses[-1]
-        prompt_chars = sum(len(message["content"]) for message in messages)
+        prompt_chars = 0
+        for message in messages:
+            content = message["content"]
+            if not isinstance(content, str):
+                raise ValueError("message content must be a string")
+            metadata = {
+                key: value for key, value in message.items() if key not in {"role", "content"}
+            }
+            prompt_chars += len(message_token_text(content, metadata))
         return AdapterResponse(
             text=text,
             reasoning=None,

@@ -10,11 +10,13 @@ probe class C scenarios depend on it.
 
 from __future__ import annotations
 
+import copy
 from collections.abc import Callable, Sequence
 
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, field_validator
 
-from awarebench.events import EventLog, EventType
+from awarebench.adapters.base import message_token_text
+from awarebench.events import EventLog, EventType, JsonValue
 from awarebench.harness._validation import (
     require_strict_non_negative_int,
     require_strict_positive_int,
@@ -27,7 +29,8 @@ class Message(BaseModel):
 
     seq is scoring-side identity assigned by ContextWindow; it is never
     surfaced agent-visible. Read transcripts through
-    ContextWindow.transcript(), which exposes only (role, content) pairs.
+    ContextWindow.transcript(), which exposes only (role, content) pairs, or
+    wire_transcript(), which also includes replay metadata.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -35,6 +38,7 @@ class Message(BaseModel):
     seq: StrictInt = Field(ge=0)
     role: str
     content: str
+    metadata: dict[str, JsonValue] = Field(default_factory=dict)
 
     @field_validator("role")
     @classmethod
@@ -42,6 +46,16 @@ class Message(BaseModel):
         """Reject empty roles; they carry no protocol meaning."""
         if not value:
             raise ValueError("role must be non-empty")
+        return value
+
+    @field_validator("metadata")
+    @classmethod
+    def _metadata_must_not_replace_core_fields(
+        cls, value: dict[str, JsonValue]
+    ) -> dict[str, JsonValue]:
+        overlap = {"role", "content"}.intersection(value)
+        if overlap:
+            raise ValueError(f"metadata cannot replace core fields: {sorted(overlap)}")
         return value
 
 
@@ -54,20 +68,21 @@ def crude_token_count(content: str) -> int:
     return len(content) // 4
 
 
-type DropPolicy = Callable[[Sequence[Message], int, int, Callable[[str], int]], list[Message]]
+type MessageTokenCounter = Callable[[Message], int]
+type DropPolicy = Callable[[Sequence[Message], int, int, MessageTokenCounter], list[Message]]
 """Selects survivors under pressure.
 
-Called as policy(messages, tokens_to_free, incoming_tokens, token_counter)
+Called as policy(messages, tokens_to_free, incoming_tokens, message_counter)
 with the window's current messages in order. Must return an ordered subset of
 those messages — the kept ones — without mutating the input and without
 inventing entries; the window validates that shape before anything is logged
 or mutated, then derives the dropped set by seq difference.
 
-The counter argument is the window's own effective per-string tokenizer
-function (tiktoken-style). Vendor-reported usage aggregates never flow
-through it; they route solely into BudgetAccountant. Policies must size
-messages under this one consistent ledger so their decisions match the
-window's accounting.
+The counter argument prices a complete Message using the window's effective
+per-string tokenizer over content plus canonical replay metadata. Vendor
+usage aggregates never flow through it; they route solely into
+BudgetAccountant. Policies must size messages under this one ledger so their
+decisions match the window's accounting.
 """
 
 
@@ -75,13 +90,13 @@ def drop_oldest(
     messages: Sequence[Message],
     tokens_to_free: int,
     incoming_tokens: int,
-    token_counter: Callable[[str], int],
+    message_counter: MessageTokenCounter,
 ) -> list[Message]:
     """Pop messages from the front until enough tokens are freed or empty."""
     kept = list(messages)
     freed = 0
     while kept and freed < tokens_to_free:
-        freed += token_counter(kept.pop(0).content)
+        freed += message_counter(kept.pop(0))
     return kept
 
 
@@ -89,17 +104,17 @@ def drop_oldest_half(
     messages: Sequence[Message],
     tokens_to_free: int,
     incoming_tokens: int,
-    token_counter: Callable[[str], int],
+    message_counter: MessageTokenCounter,
 ) -> list[Message]:
     """Drop the oldest half in one cut; front-pop more if that falls short."""
     kept = list(messages)
     cut = len(kept) // 2
     freed = 0
     for message in kept[:cut]:
-        freed += token_counter(message.content)
+        freed += message_counter(message)
     kept = kept[cut:]
     while kept and freed < tokens_to_free:
-        freed += token_counter(kept.pop(0).content)
+        freed += message_counter(kept.pop(0))
     return kept
 
 
@@ -120,9 +135,11 @@ class ContextWindow:
     only once the incoming message is known to fit.
 
     Token accounting contract: token_counter is a per-string tokenizer
-    function (tiktoken-style). Vendor-reported usage aggregates never flow
-    through it; they route solely into BudgetAccountant. The window measures
-    perceived pressure under this one consistent ledger.
+    function (tiktoken-style). Each message is charged for its content plus a
+    canonical JSON serialization of replay metadata. Vendor-reported usage
+    aggregates never flow through it; they route solely into
+    BudgetAccountant. The window measures perceived pressure under this one
+    consistent ledger.
     """
 
     def __init__(
@@ -148,39 +165,15 @@ class ContextWindow:
         self._compaction_count = 0
         self._next_seq = 0
 
-    def add(self, role: str, content: str) -> Message:
+    def add(
+        self,
+        role: str,
+        content: str,
+        metadata: dict[str, JsonValue] | None = None,
+    ) -> Message:
         """Add a message, compacting silently when the window overflows."""
-        if not isinstance(role, str) or not role:
-            raise ValueError(f"role must be a non-empty str, got {role!r}")
-        if not isinstance(content, str):
-            raise ValueError(f"content must be a str, got {type(content).__name__}")
-        incoming = self._token_counter(content)
-        require_strict_non_negative_int("token count", incoming)
-        if incoming > self._max_tokens:
-            raise ValueError(
-                f"incoming message needs {incoming} tokens, window holds {self._max_tokens}"
-            )
-        rounds: list[tuple[list[Message], list[Message], int]] = []
-        working = self._messages
-        used = self._used_tokens
-        while used + incoming > self._max_tokens:
-            kept = list(
-                self._policy(
-                    working,
-                    used + incoming - self._max_tokens,
-                    incoming,
-                    self._token_counter,
-                )
-            )
-            self._validate_kept(working, kept)
-            kept_seqs = {message.seq for message in kept}
-            dropped = [message for message in working if message.seq not in kept_seqs]
-            if not dropped:
-                raise ValueError("drop policy freed no messages; cannot make room")
-            freed = sum(self._token_counter(message.content) for message in dropped)
-            rounds.append((kept, dropped, freed))
-            working = kept
-            used -= freed
+        message = self._candidate(role, content, metadata)
+        incoming, rounds, working, used = self._plan_add(message)
         for kept, dropped, freed in rounds:
             self._log.append(
                 EventType.COMPACTION,
@@ -194,19 +187,95 @@ class ContextWindow:
             self._compaction_count += 1
         self._messages = working
         self._used_tokens = used
-        message = Message(seq=self._next_seq, role=role, content=content)
         self._next_seq += 1
         self._messages.append(message)
         self._used_tokens += incoming
-        return message
+        return message.model_copy(deep=True)
+
+    def validate_add(
+        self,
+        role: str,
+        content: str,
+        metadata: dict[str, JsonValue] | None = None,
+    ) -> None:
+        """Validate and plan an add without mutating state or logging events."""
+        self._plan_add(self._candidate(role, content, metadata))
+
+    def _candidate(
+        self,
+        role: str,
+        content: str,
+        metadata: dict[str, JsonValue] | None,
+    ) -> Message:
+        if not isinstance(role, str) or not role:
+            raise ValueError(f"role must be a non-empty str, got {role!r}")
+        if not isinstance(content, str):
+            raise ValueError(f"content must be a str, got {type(content).__name__}")
+        return Message(
+            seq=self._next_seq,
+            role=role,
+            content=content,
+            metadata={} if metadata is None else copy.deepcopy(metadata),
+        )
+
+    def _message_tokens(self, message: Message) -> int:
+        tokens = self._token_counter(message_token_text(message.content, message.metadata))
+        require_strict_non_negative_int("token count", tokens)
+        return tokens
+
+    def _plan_add(
+        self, message: Message
+    ) -> tuple[int, list[tuple[list[Message], list[Message], int]], list[Message], int]:
+        incoming = self._message_tokens(message)
+        require_strict_non_negative_int("token count", incoming)
+        if incoming > self._max_tokens:
+            raise ValueError(
+                f"incoming message needs {incoming} tokens, window holds {self._max_tokens}"
+            )
+        rounds: list[tuple[list[Message], list[Message], int]] = []
+        working = list(self._messages)
+        used = self._used_tokens
+        while used + incoming > self._max_tokens:
+            policy_messages = tuple(message.model_copy(deep=True) for message in working)
+            selected = list(
+                self._policy(
+                    policy_messages,
+                    used + incoming - self._max_tokens,
+                    incoming,
+                    self._message_tokens,
+                )
+            )
+            self._validate_kept(working, selected)
+            kept_seqs = {message.seq for message in selected}
+            kept = [message for message in working if message.seq in kept_seqs]
+            dropped = [message for message in working if message.seq not in kept_seqs]
+            if not dropped:
+                raise ValueError("drop policy freed no messages; cannot make room")
+            freed = sum(self._message_tokens(message) for message in dropped)
+            rounds.append((kept, dropped, freed))
+            working = kept
+            used -= freed
+        return incoming, rounds, working, used
 
     def messages(self) -> tuple[Message, ...]:
         """Return the surviving transcript in order, as a defensive copy."""
-        return tuple(self._messages)
+        return tuple(message.model_copy(deep=True) for message in self._messages)
 
     def transcript(self) -> tuple[tuple[str, str], ...]:
         """Agent-safe view: (role, content) pairs without scoring-side seqs."""
         return tuple((message.role, message.content) for message in self._messages)
+
+    def wire_transcript(self) -> tuple[dict[str, JsonValue], ...]:
+        """Agent-safe wire messages, including replay metadata but no scoring seqs."""
+        result: list[dict[str, JsonValue]] = []
+        for message in self._messages:
+            wire_message: dict[str, JsonValue] = {
+                "role": message.role,
+                "content": message.content,
+            }
+            wire_message.update(copy.deepcopy(message.metadata))
+            result.append(wire_message)
+        return tuple(result)
 
     @property
     def used_tokens(self) -> int:

@@ -45,8 +45,8 @@ def _extract_task_text(manifest_path: Path) -> str:
         data = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
         if isinstance(data, dict):
             return str(data.get("task", ""))
-    except Exception:
-        pass
+    except (OSError, UnicodeError, yaml.YAMLError) as exc:
+        raise RuntimeError(f"cannot read manifest: {manifest_path}") from exc
     return ""
 
 
@@ -82,7 +82,7 @@ def scan_probe(probe_dir: Path) -> list[str]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = sys.argv[1:] if argv is not None else sys.argv[1:]
+    args = argv if argv is not None else sys.argv[1:]
     probes_root = Path(args[0]) if args else Path("probes")
 
     all_leaks: list[str] = []

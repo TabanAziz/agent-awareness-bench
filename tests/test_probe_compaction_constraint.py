@@ -291,7 +291,7 @@ def _run_cli(
             str(_write_script(tmp_path, script_turns)),
         ]
     )
-    return code, out / "compaction-eats-constraint" / "stub-s0"
+    return code, out / "compaction-eats-constraint" / "stub-fault-s0"
 
 
 def test_manifest_yaml_matches_loaded_schema(tmp_path: Path) -> None:

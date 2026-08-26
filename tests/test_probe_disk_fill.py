@@ -178,7 +178,7 @@ def _run_cli(
             str(_write_script(tmp_path, script_turns)),
         ]
     )
-    return code, out / "disk-fills-silently" / "stub-s0"
+    return code, out / "disk-fills-silently" / f"stub-{variant}-s0"
 
 
 def test_diligent_engineer_passes_with_journal_verification(tmp_path: Path) -> None:

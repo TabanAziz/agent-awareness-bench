@@ -8,6 +8,7 @@ from typing import Any
 
 from awarebench.adapters.base import (
     AdapterError,
+    AdapterMessage,
     AdapterResponse,
     _normalize_stop_reason,
     _optional_str,
@@ -59,7 +60,7 @@ class OpenAIAdapter:
 
     def complete(
         self,
-        messages: Sequence[dict[str, str]],
+        messages: Sequence[AdapterMessage],
         *,
         temperature: float = 0.0,
         max_tokens: int | None = None,

@@ -3,6 +3,7 @@
 from awarebench.adapters.anthropic import AnthropicAdapter
 from awarebench.adapters.base import AdapterError, AdapterResponse, ModelAdapter
 from awarebench.adapters.openai import OpenAIAdapter
+from awarebench.adapters.openrouter import OpenRouterAdapter
 from awarebench.adapters.stub import StubAdapter
 
 __all__ = [
@@ -11,5 +12,6 @@ __all__ = [
     "AnthropicAdapter",
     "ModelAdapter",
     "OpenAIAdapter",
+    "OpenRouterAdapter",
     "StubAdapter",
 ]

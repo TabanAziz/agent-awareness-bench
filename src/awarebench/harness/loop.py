@@ -43,7 +43,7 @@ from typing import Any, Final, Literal
 
 from pydantic import BaseModel, ConfigDict
 
-from awarebench.adapters.base import AdapterError, ModelAdapter
+from awarebench.adapters.base import AdapterError, AdapterMessage, ModelAdapter
 from awarebench.events import EventLog, EventType
 from awarebench.harness._validation import require_strict_positive_int
 from awarebench.harness.budget import BudgetAccountant
@@ -157,24 +157,32 @@ class AgentLoop:
                     status="adapter_failed", report_text=None, cycles_used=cycles_used
                 )
 
+            model_payload: dict[str, Any] = {
+                "text": response.text,
+                "prompt_tokens": response.prompt_tokens,
+                "completion_tokens": response.completion_tokens,
+                "model": response.model,
+                "request_id": response.request_id,
+                "stop_reason": response.stop_reason,
+            }
+            if response.reasoning is not None:
+                model_payload["reasoning"] = response.reasoning
+            if response.assistant_metadata:
+                model_payload["assistant_metadata"] = response.assistant_metadata
             self._log.append(
                 EventType.MODEL_MESSAGE,
                 self._cycles.current,
                 self._clock.now_us,
-                {
-                    "text": response.text,
-                    "prompt_tokens": response.prompt_tokens,
-                    "completion_tokens": response.completion_tokens,
-                    "model": response.model,
-                    "request_id": response.request_id,
-                    "stop_reason": response.stop_reason,
-                },
+                model_payload,
             )
             self._budget.add_tokens(response.prompt_tokens, response.completion_tokens)
 
             action = _parse_action(response.text)
             if action is None:
                 try:
+                    self._context.add(
+                        "assistant", response.text, metadata=response.assistant_metadata
+                    )
                     self._context.add("user", NUDGE_TEXT)
                 except ValueError:
                     return self._overflow(cycles_used)
@@ -192,10 +200,10 @@ class AgentLoop:
                 )
 
             try:
-                self._context.add("assistant", response.text)
+                self._context.add("assistant", response.text, metadata=response.assistant_metadata)
             except ValueError:
                 return self._overflow(cycles_used)
-            result_repr = self._execute_tool(action)
+            result_repr = execute_tool_action(self._host, action)
             try:
                 self._context.add("user", result_repr)
             except ValueError:
@@ -207,33 +215,34 @@ class AgentLoop:
         """Terminal outcome when the window cannot hold the next transcript message."""
         return LoopOutcome(status="context_overflow", report_text=None, cycles_used=cycles_used)
 
-    def _build_messages(self) -> list[dict[str, str]]:
+    def _build_messages(self) -> list[AdapterMessage]:
         """System message (task + protocol) followed by the context transcript."""
         system_content = f"{self._probe.manifest.task}\n\n{_PROTOCOL_INSTRUCTIONS}"
-        messages = [{"role": "system", "content": system_content}]
-        messages.extend(
-            {"role": role, "content": content} for role, content in self._context.transcript()
-        )
+        messages: list[AdapterMessage] = [{"role": "system", "content": system_content}]
+        messages.extend(self._context.wire_transcript())
         return messages
 
-    def _execute_tool(self, action: dict[str, Any]) -> str:
-        """Dispatch one tool action; any failure becomes an error-repr result."""
-        name = action["name"]
-        args = action["args"]
-        try:
-            if not isinstance(args, dict):
-                raise ValueError("args must be an object")
-            if name == "read_file":
-                result: object = self._host.read_file(args["path"], args.get("start_line", 0))
-            elif name == "run_command":
-                result = self._host.run_command(args["command"])
-            elif name == "search_code":
-                result = self._host.search_code(args["pattern"])
-            else:  # "http_get" - membership validated at parse time
-                result = self._host.http_get(args["url"])
-        except Exception as exc:  # noqa: BLE001 -- model input must never crash the run
-            return f"tool error: {type(exc).__name__}: {exc}"
-        return repr(result)
+
+def execute_tool_action(host: ToolHost, action: dict[str, Any]) -> str:
+    """Dispatch one validated tool action and return the agent-visible result string."""
+    name = action["name"]
+    args = action["args"]
+    try:
+        if not isinstance(args, dict):
+            raise ValueError("args must be an object")
+        if name == "read_file":
+            result: object = host.read_file(args["path"], args.get("start_line", 0))
+        elif name == "run_command":
+            result = host.run_command(args["command"])
+        elif name == "search_code":
+            result = host.search_code(args["pattern"])
+        elif name == "http_get":
+            result = host.http_get(args["url"])
+        else:
+            raise ValueError(f"unknown tool: {name}")
+    except Exception as exc:  # noqa: BLE001 -- tool input must never crash a run
+        return f"tool error: {type(exc).__name__}: {exc}"
+    return repr(result)
 
 
 def _parse_action(text: str) -> dict[str, Any] | None:

@@ -150,11 +150,26 @@ def test_build_report_records_scored_results(tmp_path: Path) -> None:
     snapshot = {"prompt_tokens": 10, "completion_tokens": 20, "tool_calls": 5, "wall_us_used": 7}
     results = evaluate(loaded, log)
     report = build_report(
-        loaded, model="stub", seed=0, outcome=outcome, budget_snapshot=snapshot, predicates=results
+        loaded,
+        backend="stub",
+        requested_model=None,
+        variant="fault",
+        seed=0,
+        outcome=outcome,
+        budget_snapshot=snapshot,
+        predicates=results,
     )
     assert report.predicates == results
     assert report.passed is True
 
-    unscored = build_report(loaded, model="stub", seed=0, outcome=outcome, budget_snapshot=snapshot)
+    unscored = build_report(
+        loaded,
+        backend="stub",
+        requested_model=None,
+        variant="fault",
+        seed=0,
+        outcome=outcome,
+        budget_snapshot=snapshot,
+    )
     assert unscored.predicates == {}
     assert unscored.passed is None

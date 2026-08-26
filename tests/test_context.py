@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import copy
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from awarebench.events import EventLog, EventType
+from awarebench.adapters.base import message_token_text
+from awarebench.events import EventLog, EventType, JsonValue
 from awarebench.harness.clock import CycleCounter, VirtualClock
 from awarebench.harness.context import (
     ContextWindow,
@@ -195,6 +197,72 @@ def test_incoming_larger_than_window_raises_without_logging() -> None:
     assert window.used_tokens == 1
 
 
+def test_replay_metadata_counts_toward_incoming_limit_without_side_effects() -> None:
+    window, log, *_ = _make_window(max_tokens=8)
+    metadata: dict[str, JsonValue] = {
+        "reasoning_details": [
+            {"type": "reasoning.encrypted", "data": "x" * 64},
+        ]
+    }
+
+    with pytest.raises(ValueError, match="window holds"):
+        window.add("assistant", "ok", metadata=metadata)
+
+    assert window.used_tokens == 0
+    assert window.messages() == ()
+    assert len(log) == 0
+
+
+def test_compaction_freed_tokens_include_replay_metadata() -> None:
+    metadata: dict[str, JsonValue] = {
+        "reasoning_details": [
+            {"type": "reasoning.encrypted", "data": "ciphertext"},
+        ]
+    }
+    first_text = message_token_text("ok", metadata)
+    first_cost = crude_token_count(first_text)
+    window, log, *_ = _make_window(max_tokens=first_cost)
+    window.add("assistant", "ok", metadata=metadata)
+
+    window.add("user", "next")
+
+    assert window.used_tokens == crude_token_count("next")
+    [event] = _compaction_events(log)
+    assert event.payload["freed_tokens"] == first_cost
+
+
+def test_nested_metadata_mutation_cannot_change_internal_accounting() -> None:
+    metadata: dict[str, JsonValue] = {
+        "reasoning_details": [
+            {"type": "reasoning.encrypted", "data": "ciphertext"},
+        ]
+    }
+    expected_wire: dict[str, JsonValue] = copy.deepcopy(
+        {
+            "role": "assistant",
+            "content": "ok",
+            **metadata,
+        }
+    )
+    first_cost = crude_token_count(message_token_text("ok", metadata))
+    window, log, *_ = _make_window(max_tokens=first_cost)
+
+    added = window.add("assistant", "ok", metadata=metadata)
+    snapshot = window.messages()[0]
+    for exposed in (metadata, added.metadata, snapshot.metadata):
+        details: Any = exposed["reasoning_details"]
+        details[0]["data"] = "x" * 1_000
+
+    assert window.wire_transcript() == (expected_wire,)
+    assert window.used_tokens == first_cost
+
+    window.add("user", "next")
+
+    [event] = _compaction_events(log)
+    assert event.payload["freed_tokens"] == first_cost
+    assert window.used_tokens == crude_token_count("next")
+
+
 def test_zero_cost_history_under_pressure_rejects_cleanly() -> None:
     costs = {"nothing": 0, "heavy": 6}
     window, log, *_ = _make_window(max_tokens=5, costs=costs)
@@ -220,7 +288,7 @@ def test_do_nothing_policy_leaves_zero_events_and_intact_state() -> None:
         messages: Sequence[Message],
         tokens_to_free: int,
         incoming_tokens: int,
-        token_counter: Callable[[str], int],
+        token_counter: Callable[[Message], int],
     ) -> list[Message]:
         return list(messages)
 
@@ -244,7 +312,7 @@ def test_policy_frees_then_stalls_leaves_zero_events_and_intact_state() -> None:
         messages: Sequence[Message],
         tokens_to_free: int,
         incoming_tokens: int,
-        token_counter: Callable[[str], int],
+        token_counter: Callable[[Message], int],
     ) -> list[Message]:
         calls.append(tokens_to_free)
         if len(calls) == 1:
@@ -273,7 +341,7 @@ def test_smuggler_policy_rejected_with_zero_events_and_intact_state() -> None:
         messages: Sequence[Message],
         tokens_to_free: int,
         incoming_tokens: int,
-        token_counter: Callable[[str], int],
+        token_counter: Callable[[Message], int],
     ) -> list[Message]:
         return [Message(seq=999, role="ghost", content="boo")]
 
@@ -295,7 +363,7 @@ def test_padded_superset_policy_rejected_with_zero_events_and_intact_state() -> 
         messages: Sequence[Message],
         tokens_to_free: int,
         incoming_tokens: int,
-        token_counter: Callable[[str], int],
+        token_counter: Callable[[Message], int],
     ) -> list[Message]:
         return [*messages, messages[0]]
 
@@ -317,7 +385,7 @@ def test_stingy_policy_buffers_two_rounds_then_commits_atomically() -> None:
         messages: Sequence[Message],
         tokens_to_free: int,
         incoming_tokens: int,
-        token_counter: Callable[[str], int],
+        token_counter: Callable[[Message], int],
     ) -> list[Message]:
         return list(messages[1:]) if messages else []
 
@@ -355,7 +423,7 @@ def _four_messages() -> list[Message]:
 def test_drop_oldest_pops_front_until_enough_freed() -> None:
     counter = _fixed_counter({"a": 4, "b": 2, "c": 2, "d": 1})
 
-    kept = drop_oldest(_four_messages(), 5, 2, counter)
+    kept = drop_oldest(_four_messages(), 5, 2, lambda message: counter(message.content))
 
     assert [m.seq for m in kept] == [2, 3]
 
@@ -365,11 +433,11 @@ def test_drop_oldest_half_cuts_half_then_falls_back_to_front_popping() -> None:
     messages = _four_messages()
 
     # Half cut frees a(4)+b(2)=6 >= 5: exactly the oldest half goes.
-    kept = drop_oldest_half(messages, 5, 2, counter)
+    kept = drop_oldest_half(messages, 5, 2, lambda message: counter(message.content))
     assert [m.seq for m in kept] == [2, 3]
 
     # Needing 9 exceeds the half cut (6): c(2) then d(1) are popped too.
-    kept = drop_oldest_half(messages, 9, 2, counter)
+    kept = drop_oldest_half(messages, 9, 2, lambda message: counter(message.content))
     assert kept == []
 
 
@@ -379,7 +447,7 @@ def test_drop_oldest_half_on_odd_count_cuts_floor_half() -> None:
         Message(seq=index, role="user", content=c) for index, c in enumerate(("a", "b", "c"))
     ]
 
-    kept = drop_oldest_half(messages, 2, 2, counter)
+    kept = drop_oldest_half(messages, 2, 2, lambda message: counter(message.content))
 
     assert [m.seq for m in kept] == [1, 2]
 

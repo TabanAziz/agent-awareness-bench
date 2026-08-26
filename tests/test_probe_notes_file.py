@@ -112,7 +112,7 @@ def _run_cli(
             str(_write_script(tmp_path, script_turns)),
         ]
     )
-    return code, out / "notes-file-hits-limit" / "stub-s0"
+    return code, out / "notes-file-hits-limit" / f"stub-{variant}-s0"
 
 
 # --- manifest and generator -------------------------------------------------

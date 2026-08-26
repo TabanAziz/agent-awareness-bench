@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
+from itertools import pairwise
 from pathlib import Path
 from typing import Any, Final
 
 import yaml
 
-from awarebench.adapters import AdapterError, AdapterResponse, StubAdapter
-from awarebench.events import EventLog, EventType
+from awarebench.adapters import AdapterError, AdapterResponse, OpenRouterAdapter, StubAdapter
+from awarebench.adapters.base import AdapterMessage
+from awarebench.events import EventLog, EventType, JsonValue
 from awarebench.harness.budget import BudgetAccountant
 from awarebench.harness.clock import CycleCounter, VirtualClock
 from awarebench.harness.context import ContextWindow
@@ -135,6 +138,112 @@ class _ExplodingAdapter:
         raise AdapterError("sdk down")
 
 
+class _RecordingScriptAdapter:
+    """Scripted adapter that snapshots every complete() request."""
+
+    def __init__(self, responses: Sequence[str]) -> None:
+        self._stub = StubAdapter(responses)
+        self.calls: list[list[AdapterMessage]] = []
+
+    def complete(
+        self,
+        messages: Sequence[AdapterMessage],
+        *,
+        temperature: float = 0.0,
+        max_tokens: int | None = None,
+    ) -> AdapterResponse:
+        self.calls.append([dict(message) for message in messages])
+        return self._stub.complete(
+            messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+
+
+class _ReasoningAdapter:
+    def complete(
+        self,
+        messages: Sequence[AdapterMessage],
+        *,
+        temperature: float = 0.0,
+        max_tokens: int | None = None,
+    ) -> AdapterResponse:
+        return AdapterResponse(
+            text=_FINAL_REPORT,
+            reasoning="the counter is frozen while liveness advances",
+            prompt_tokens=10,
+            completion_tokens=5,
+            stop_reason="stop",
+            model="vendor/model",
+            request_id="gen_1",
+        )
+
+
+class _ReasoningReplayAdapter:
+    def __init__(self) -> None:
+        self.calls: list[list[AdapterMessage]] = []
+        self._responses = [_TOOL_CALL, _FINAL_REPORT]
+        self._cursor = 0
+        self.details: list[JsonValue] = [
+            {"type": "reasoning.encrypted", "data": "ciphertext", "id": "enc-1"},
+            {"type": "reasoning.text", "text": None, "id": "text-1"},
+            {
+                "type": "reasoning.server_tool_call",
+                "name": "search",
+                "arguments": {"query": "notes"},
+            },
+        ]
+
+    def complete(
+        self,
+        messages: Sequence[AdapterMessage],
+        *,
+        temperature: float = 0.0,
+        max_tokens: int | None = None,
+    ) -> AdapterResponse:
+        self.calls.append([dict(message) for message in messages])
+        text = self._responses[self._cursor]
+        self._cursor += 1
+        return AdapterResponse(
+            text=text,
+            reasoning=None,
+            assistant_metadata={"reasoning_details": self.details} if self._cursor == 1 else {},
+            prompt_tokens=10,
+            completion_tokens=5,
+            stop_reason="stop",
+            model="vendor/model",
+            request_id=f"gen_{self._cursor}",
+        )
+
+
+class _OpenRouterSequenceTransport:
+    def __init__(self, responses: list[dict[str, Any]]) -> None:
+        self._responses = responses
+        self.calls: list[dict[str, Any]] = []
+
+    def __call__(self, request: Any, timeout: float) -> bytes:
+        del timeout
+        assert isinstance(request.data, bytes)
+        self.calls.append(json.loads(request.data.decode("utf-8")))
+        return json.dumps(self._responses[len(self.calls) - 1]).encode("utf-8")
+
+
+def _openrouter_loop_response(text: str, request_id: str) -> dict[str, Any]:
+    return {
+        "choices": [
+            {
+                "index": 0,
+                "message": {"role": "assistant", "content": text},
+                "finish_reason": "stop",
+            }
+        ],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+        "object": "chat.completion",
+        "model": "vendor/model",
+        "id": request_id,
+    }
+
+
 def _events_of_type(log: EventLog, event_type: str) -> list[Any]:
     return [event for event in log if event.type == event_type]
 
@@ -178,6 +287,132 @@ def test_tool_call_then_final_report(tmp_path: Path) -> None:
     assert json.loads(transcript[0][1])["action"]["type"] == "tool"
     assert transcript[1][0] == "user"
     assert "alpha" in transcript[1][1]  # repr of the read file content
+
+
+def test_each_cycle_receives_every_prior_tool_result(tmp_path: Path) -> None:
+    responses = [_TOOL_CALL, _TOOL_CALL, _TOOL_CALL, _TOOL_CALL, _FINAL_REPORT]
+    stack = _Stack(tmp_path, responses, max_cycles=5)
+    adapter = _RecordingScriptAdapter(responses)
+
+    outcome = stack.new_loop(adapter, max_cycles=5).run()
+
+    assert outcome.status == "reported"
+    assert len(adapter.calls) == 5
+    expected_transcript: list[dict[str, str]] = []
+    for call_index, sent_messages in enumerate(adapter.calls):
+        assert sent_messages[0]["role"] == "system"
+        assert sent_messages[1:] == expected_transcript
+        if call_index < 4:
+            expected_transcript.extend(
+                [
+                    {"role": "assistant", "content": _TOOL_CALL},
+                    {"role": "user", "content": repr("alpha\nbeta")},
+                ]
+            )
+
+
+def test_prompt_token_counts_strictly_increase_across_tool_cycles(tmp_path: Path) -> None:
+    responses = [_TOOL_CALL, _TOOL_CALL, _TOOL_CALL, _TOOL_CALL, _FINAL_REPORT]
+    stack = _Stack(tmp_path, responses, max_cycles=5)
+
+    outcome = stack.loop.run()
+
+    assert outcome.status == "reported"
+    counts = [
+        event.payload["prompt_tokens"]
+        for event in _events_of_type(stack.log, EventType.MODEL_MESSAGE)
+    ]
+    assert len(counts) == 5
+    assert all(left < right for left, right in pairwise(counts))
+
+
+def test_model_reasoning_is_preserved_in_event_log(tmp_path: Path) -> None:
+    stack = _Stack(tmp_path, [_FINAL_REPORT])
+
+    outcome = stack.new_loop(_ReasoningAdapter(), max_cycles=1).run()
+
+    assert outcome.status == "reported"
+    [model_event] = _events_of_type(stack.log, EventType.MODEL_MESSAGE)
+    assert model_event.payload["reasoning"] == "the counter is frozen while liveness advances"
+
+
+def test_structured_reasoning_is_replayed_exactly_on_next_cycle(tmp_path: Path) -> None:
+    stack = _Stack(tmp_path, [_TOOL_CALL, _FINAL_REPORT])
+    adapter = _ReasoningReplayAdapter()
+
+    outcome = stack.new_loop(adapter, max_cycles=2).run()
+
+    assert outcome.status == "reported"
+    assert adapter.calls[1][1] == {
+        "role": "assistant",
+        "content": _TOOL_CALL,
+        "reasoning_details": adapter.details,
+    }
+    assert adapter.calls[1][2] == {"role": "user", "content": repr("alpha\nbeta")}
+    first_model_event = _events_of_type(stack.log, EventType.MODEL_MESSAGE)[0]
+    assert first_model_event.payload["assistant_metadata"] == {"reasoning_details": adapter.details}
+
+
+def test_openrouter_wire_replays_exact_reasoning_details_on_next_cycle(tmp_path: Path) -> None:
+    details: list[JsonValue] = [
+        {"type": "reasoning.encrypted", "data": "ciphertext", "id": "enc-1"},
+        {"type": "reasoning.text", "text": None, "id": "text-1"},
+        {
+            "type": "reasoning.server_tool_call",
+            "name": "search",
+            "arguments": {"query": "notes"},
+        },
+    ]
+    first = _openrouter_loop_response(_TOOL_CALL, "gen_1")
+    first["choices"][0]["message"]["reasoning_details"] = details
+    transport = _OpenRouterSequenceTransport(
+        [first, _openrouter_loop_response(_FINAL_REPORT, "gen_2")]
+    )
+    adapter = OpenRouterAdapter(model="vendor/model", api_key="key", transport=transport)
+    stack = _Stack(tmp_path, [_TOOL_CALL, _FINAL_REPORT])
+
+    outcome = stack.new_loop(adapter, max_cycles=2).run()
+
+    assert outcome.status == "reported"
+    assert transport.calls[1]["messages"][1] == {
+        "role": "assistant",
+        "content": _TOOL_CALL,
+        "reasoning_details": details,
+    }
+
+
+def test_non_finite_openrouter_response_becomes_logged_adapter_failure(tmp_path: Path) -> None:
+    malformed = _openrouter_loop_response(_FINAL_REPORT, "gen_bad")
+    malformed["choices"][0]["message"]["reasoning_details"] = [
+        {"type": "reasoning.encrypted", "data": float("nan")}
+    ]
+    adapter = OpenRouterAdapter(
+        model="vendor/model",
+        api_key="key",
+        transport=_OpenRouterSequenceTransport([malformed]),
+    )
+    stack = _Stack(tmp_path, [_FINAL_REPORT])
+
+    outcome = stack.new_loop(adapter, max_cycles=1).run()
+
+    assert outcome.status == "adapter_failed"
+    [model_event] = _events_of_type(stack.log, EventType.MODEL_MESSAGE)
+    assert model_event.payload == {"error": "openrouter response was not valid JSON"}
+
+
+def test_malformed_assistant_reply_precedes_nudge_in_next_request(tmp_path: Path) -> None:
+    malformed = "oops, not json"
+    responses = [malformed, _FINAL_REPORT]
+    stack = _Stack(tmp_path, responses, max_cycles=2)
+    adapter = _RecordingScriptAdapter(responses)
+
+    outcome = stack.new_loop(adapter, max_cycles=2).run()
+
+    assert outcome.status == "reported"
+    assert adapter.calls[1][1:] == [
+        {"role": "assistant", "content": malformed},
+        {"role": "user", "content": NUDGE_TEXT},
+    ]
 
 
 def test_malformed_turns_consume_cycles_and_nudge(tmp_path: Path) -> None:

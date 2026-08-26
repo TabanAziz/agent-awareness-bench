@@ -158,7 +158,7 @@ def _run_cli(
             str(_write_script(tmp_path, script_turns)),
         ]
     )
-    return code, out / "latency-drift" / "stub-s0"
+    return code, out / "latency-drift" / "stub-fault-s0"
 
 
 def test_degradation_report_passes_all_success_predicates(tmp_path: Path) -> None:

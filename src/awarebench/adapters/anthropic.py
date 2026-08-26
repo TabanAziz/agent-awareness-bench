@@ -8,6 +8,7 @@ from typing import Any
 
 from awarebench.adapters.base import (
     AdapterError,
+    AdapterMessage,
     AdapterResponse,
     _normalize_stop_reason,
     _optional_str,
@@ -56,7 +57,7 @@ class AnthropicAdapter:
 
     def complete(
         self,
-        messages: Sequence[dict[str, str]],
+        messages: Sequence[AdapterMessage],
         *,
         temperature: float = 0.0,
         max_tokens: int | None = None,
@@ -68,8 +69,16 @@ class AnthropicAdapter:
         system parameter the Anthropic API requires.
         """
         client = self._ensure_client()
-        system_parts = [message["content"] for message in messages if message["role"] == "system"]
-        chat_messages = [message for message in messages if message["role"] != "system"]
+        system_parts: list[str] = []
+        chat_messages: list[AdapterMessage] = []
+        for message in messages:
+            if message["role"] == "system":
+                content = message["content"]
+                if not isinstance(content, str):
+                    raise AdapterError("malformed adapter input: system content must be a string")
+                system_parts.append(content)
+            else:
+                chat_messages.append(message)
         request: dict[str, Any] = {
             "model": self._model,
             "messages": chat_messages,

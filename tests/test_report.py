@@ -63,12 +63,23 @@ def _spent_budget() -> dict[str, int]:
 def test_build_report_maps_every_field(tmp_path: Path) -> None:
     probe = _loaded_probe(tmp_path)
 
-    report = build_report(probe, "stub", 7, _reported_outcome(), _spent_budget())
+    report = build_report(
+        probe,
+        backend="stub",
+        requested_model=None,
+        variant="fault",
+        seed=7,
+        outcome=_reported_outcome(),
+        budget_snapshot=_spent_budget(),
+    )
 
     assert isinstance(report, RunReport)
-    assert report.schema_version == 1
+    assert report.schema_version == 2
     assert report.probe_id == "report-probe"
     assert report.model == "stub"
+    assert report.backend == "stub"
+    assert report.requested_model is None
+    assert report.variant == "fault"
     assert report.seed == 7
     assert report.outcome == "reported"
     assert report.report_text == "all good"
@@ -81,7 +92,15 @@ def test_build_report_maps_every_field(tmp_path: Path) -> None:
 
 def test_write_json_creates_parent_dirs_and_roundtrips(tmp_path: Path) -> None:
     probe = _loaded_probe(tmp_path)
-    report = build_report(probe, "stub", 7, _reported_outcome(), _spent_budget())
+    report = build_report(
+        probe,
+        backend="stub",
+        requested_model=None,
+        variant="control",
+        seed=7,
+        outcome=_reported_outcome(),
+        budget_snapshot=_spent_budget(),
+    )
     target = tmp_path / "deep" / "nested" / "report.json"
 
     report.write_json(target)
@@ -89,9 +108,12 @@ def test_write_json_creates_parent_dirs_and_roundtrips(tmp_path: Path) -> None:
     assert target.is_file()
     loaded: dict[str, Any] = json.loads(target.read_text(encoding="utf-8"))
     assert loaded == report.model_dump(mode="json")
-    assert loaded["schema_version"] == 1
+    assert loaded["schema_version"] == 2
     assert loaded["probe_id"] == "report-probe"
     assert loaded["model"] == "stub"
+    assert loaded["backend"] == "stub"
+    assert loaded["requested_model"] is None
+    assert loaded["variant"] == "control"
     assert loaded["seed"] == 7
     assert loaded["outcome"] == "reported"
     assert loaded["report_text"] == "all good"
@@ -106,10 +128,19 @@ def test_adapter_failed_outcome_serializes_null_report_text(tmp_path: Path) -> N
     probe = _loaded_probe(tmp_path)
     outcome = LoopOutcome(status="adapter_failed", report_text=None, cycles_used=1)
 
-    report = build_report(probe, "openai", 3, outcome, _spent_budget())
+    report = build_report(
+        probe,
+        backend="openai",
+        requested_model="gpt-test",
+        variant="fault",
+        seed=3,
+        outcome=outcome,
+        budget_snapshot=_spent_budget(),
+    )
 
     assert report.outcome == "adapter_failed"
     assert report.report_text is None
+    assert report.model == "openai:gpt-test"
     target = tmp_path / "out" / "report.json"
     report.write_json(target)
     loaded: dict[str, Any] = json.loads(target.read_text(encoding="utf-8"))
