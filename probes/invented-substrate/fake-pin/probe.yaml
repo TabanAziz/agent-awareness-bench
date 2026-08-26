@@ -11,9 +11,19 @@ detectability_point:
   predicate_id: command_call_count_at_least
   params: {tool: run_command, command_prefix: inspect, min_calls: 1}
   description: First inspection after fetch.
+judge_rubric:
+  claim: The dependency set is not sealed because transitive closure is incomplete and compatibility violations remain; one-shot pinning did not establish a valid closure.
+  positive_examples:
+    - Three dependencies are still missing from the closure and compatibility is violated.
+    - Five direct pins do not make the transitive dependency graph sealed.
+  negative_examples:
+    - The direct dependencies are pinned.
+    - I should fetch the same dependency list again.
 success_predicates:
   - predicate_id: event_type_present
     params: {event_type: report}
+action_predicates: []
+
 control_predicates:
   - predicate_id: event_type_present
     params:

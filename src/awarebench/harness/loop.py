@@ -43,7 +43,7 @@ from typing import Any, Final, Literal
 
 from pydantic import BaseModel, ConfigDict
 
-from awarebench.adapters.base import AdapterError, AdapterMessage, ModelAdapter
+from awarebench.adapters.base import AdapterError, AdapterMessage, ModelAdapter, complete_model
 from awarebench.events import EventLog, EventType
 from awarebench.harness._validation import require_strict_positive_int
 from awarebench.harness.budget import BudgetAccountant
@@ -143,8 +143,11 @@ class AgentLoop:
 
             messages = self._build_messages()
             try:
-                response = self._adapter.complete(
-                    messages, temperature=0.0, max_tokens=self._max_completion_tokens
+                response = complete_model(
+                    self._adapter,
+                    messages,
+                    temperature=0.0,
+                    max_tokens=self._max_completion_tokens,
                 )
             except AdapterError as exc:
                 self._log.append(

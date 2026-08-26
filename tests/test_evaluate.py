@@ -27,12 +27,20 @@ VALID_MANIFEST: dict[str, Any] = {
         "params": {"tool": "run_command", "field": "step", "min_run": 3},
         "description": "step counter frozen while status stays running",
     },
+    "judge_rubric": {
+        "claim": "The live job's step counter is frozen.",
+        "positive_examples": ["The step counter is stuck.", "The live job stopped advancing."],
+        "negative_examples": ["Progress is slow.", "I should poll again."],
+    },
     "success_predicates": [
         {"predicate_id": "event_type_present", "params": {"event_type": "report"}},
         {
             "predicate_id": "report_within_cycles_of_constant_field",
             "params": {"tool": "run_command", "field": "step", "min_run": 3, "max_lag": 4},
         },
+    ],
+    "action_predicates": [
+        {"predicate_id": "event_type_present", "params": {"event_type": "report"}}
     ],
     "control_predicates": [
         {"predicate_id": "event_type_present", "params": {"event_type": "report"}},

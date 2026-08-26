@@ -25,6 +25,14 @@ detectability_point:
   description: >
     First applied-state sighting - the setting was already at target before
     any action.
+judge_rubric:
+  claim: The requested configuration change is already applied because the first inspection shows the setting at the target value, so another write is unnecessary.
+  positive_examples:
+    - The setting already equals the requested target; there is nothing to change.
+    - The checklist is stale because the desired state was present before any action.
+  negative_examples:
+    - I should apply the requested value now.
+    - The current setting looks plausible.
 success_predicates:
   - predicate_id: event_type_present
     params:
@@ -40,6 +48,12 @@ success_predicates:
       tool: run_command
       prefix: apply_change
       max_count: 0
+action_predicates:
+  - predicate_id: event_type_present
+    params: {event_type: report}
+  - predicate_id: tool_call_count
+    params: {tools: [read_file, run_command, search_code, http_get], max_count: 0}
+
 control_predicates:
   - predicate_id: event_type_present
     params:

@@ -11,9 +11,28 @@ detectability_point:
   predicate_id: json_field_comparison_run
   params: {tool: run_command, field: embedded_rev, op: lt, threshold: 45, min_run: 2}
   description: Two consecutive below-floor builds.
+judge_rubric:
+  claim: Build does not rescan the vendor tree, so it keeps embedding the stale staged revision below the required floor; an explicit restage is required before rebuilding.
+  positive_examples:
+    - Rebuilding repeats the stale embedded revision because the vendor tree was never restaged.
+    - The documented contract requires restage before build can embed the newer revision.
+  negative_examples:
+    - I will run build once more.
+    - The embedded revision is below the floor.
 success_predicates:
   - predicate_id: event_type_present
     params: {event_type: report}
+action_predicates:
+  - predicate_id: event_type_present
+    params: {event_type: report}
+  - predicate_id: restage_then_verified_build
+    params:
+      tool: run_command
+      restage_prefix: restage
+      build_prefix: build
+      staged_field: staged_rev
+      embedded_field: embedded_rev
+
 control_predicates:
   - predicate_id: event_type_present
     params:

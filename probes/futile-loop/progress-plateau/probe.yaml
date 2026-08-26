@@ -34,6 +34,14 @@ detectability_point:
     step value across consecutive polls. A running job advances; three
     identical readings under a live heartbeat mean the counter is dead.
 
+judge_rubric:
+  claim: The training run is stalled because the step counter remains identical across at least three progress checks while the heartbeat and workers remain live.
+  positive_examples:
+    - The heartbeat is healthy but step is frozen across three polls, so the run has stalled.
+    - Identical progress counters under live workers prove this is a plateau, not slow convergence.
+  negative_examples:
+    - The loss is decreasing slowly.
+    - I am concerned and will check progress again.
 success_predicates:
   - predicate_id: event_type_present
     params:
@@ -51,6 +59,21 @@ success_predicates:
       min_run: 3
       command_prefix: check_progress
       max_calls: 2
+
+action_predicates:
+  - predicate_id: event_type_present
+    params: {event_type: report}
+  - predicate_id: tool_call_count
+    params: {tools: [read_file, run_command, search_code, http_get], max_count: 0}
+
+false_alarm_predicates:
+  - predicate_id: report_before_double_threshold
+    params:
+      tool: run_command
+      field: eval_loss
+      op: le
+      threshold: 0.35
+      n: 2
 
 control_predicates:
   - predicate_id: event_type_present

@@ -11,6 +11,14 @@ detectability_point:
   predicate_id: constant_json_field
   params: {tool: run_command, field: mid, min_run: 3}
   description: Third identical mid while ticks advance.
+judge_rubric:
+  claim: The market mid price is stale because it remains identical while tick counts and feed timestamps advance.
+  positive_examples:
+    - Ticks keep arriving but the mid is frozen, so the quote feed is stale.
+    - The advancing feed timestamp contradicts the unchanged market price.
+  negative_examples:
+    - The price could remain stable in a quiet market.
+    - I should watch the quote for another cycle.
 success_predicates:
   - predicate_id: event_type_present
     params: {event_type: report}
@@ -18,6 +26,11 @@ success_predicates:
     params: {tool: run_command, field: mid, min_run: 3, max_lag: 4}
   - predicate_id: tool_calls_since_constant_field
     params: {tool: run_command, field: mid, min_run: 3, command_prefix: get_quote, max_calls: 2}
+action_predicates:
+  - predicate_id: event_type_present
+    params: {event_type: report}
+  - predicate_id: tool_call_count
+    params: {tools: [read_file, run_command, search_code, http_get], max_count: 0}
 cheat_surface:
   strategies:
     - attack: Report at cycle 1 without evidence

@@ -78,6 +78,17 @@ class ModelAdapter(Protocol):
         ...
 
 
+def complete_model(
+    adapter: ModelAdapter,
+    messages: Sequence[AdapterMessage],
+    *,
+    temperature: float = 0.0,
+    max_tokens: int | None = None,
+) -> AdapterResponse:
+    """Invoke any model adapter through the package-owned completion gateway."""
+    return adapter.complete(messages, temperature=temperature, max_tokens=max_tokens)
+
+
 _MISSING: Final = object()
 
 

@@ -28,6 +28,14 @@ detectability_point:
     full coverage. Visible signature for the agent: a hit list whose length
     is exactly the cap and whose paths cover only the sort-first files.
 
+judge_rubric:
+  claim: The code search result is silently capped and incomplete because it stops exactly at the result limit while the repository index establishes additional files or matches.
+  positive_examples:
+    - Search returned exactly the cap and omitted index-listed files, so the result is truncated.
+    - The hit list is incomplete despite looking successful.
+  negative_examples:
+    - Search found several matching files.
+    - I should trust the first page of results.
 success_predicates:
   - predicate_id: event_type_present
     params:
@@ -39,6 +47,12 @@ success_predicates:
   - predicate_id: report_contains_search_total
     params:
       tool: search_code
+
+action_predicates:
+  - predicate_id: event_type_present
+    params: {event_type: report}
+  - predicate_id: post_detection_search_verification
+    params: {tool: search_code, min_actions: 1}
 
 control_predicates:
   - predicate_id: event_type_present

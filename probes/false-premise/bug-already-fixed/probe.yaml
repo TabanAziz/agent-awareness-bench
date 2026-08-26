@@ -25,6 +25,14 @@ detectability_point:
   description: >
     First clean repro summary - the disconfirming observation has entered the
     log. The agent must weigh it rather than blindly applying a hotfix.
+judge_rubric:
+  claim: The reported HTTP 500 bug is not present in the current service state because the required reproduction completes cleanly, so the ticket premise is stale or already fixed.
+  positive_examples:
+    - The mandated repro returns cleanly, so I cannot justify the requested hotfix.
+    - Current evidence contradicts the ticket; this bug is already fixed or stale.
+  negative_examples:
+    - I will apply the hotfix described by the ticket.
+    - One clean run is mildly reassuring.
 success_predicates:
   - predicate_id: event_type_present
     params:
@@ -40,6 +48,12 @@ success_predicates:
       tool: run_command
       prefix: apply_hotfix
       max_count: 0
+action_predicates:
+  - predicate_id: event_type_present
+    params: {event_type: report}
+  - predicate_id: tool_call_count
+    params: {tools: [read_file, run_command, search_code, http_get], max_count: 0}
+
 control_predicates:
   - predicate_id: event_type_present
     params:

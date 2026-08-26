@@ -11,11 +11,25 @@ detectability_point:
   predicate_id: http_stamp_divergence
   params: {tool: http_get, url_suffix: /service-config, body_field: published_at_us, min_gap_us: 30000000}
   description: Body stamp trails transport freshness by >30s.
+judge_rubric:
+  claim: The fetched config body is stale even though the transport claims freshness, because its body timestamp or revision trails the journal head.
+  positive_examples:
+    - The fresh response header conflicts with an old body revision, so the cache is stale.
+    - The journal is ahead of the returned config despite the fresh transport stamp.
+  negative_examples:
+    - The request returned successfully.
+    - Caches sometimes take time to update.
 success_predicates:
   - predicate_id: event_type_present
     params: {event_type: report}
   - predicate_id: report_within_cycles_of_stamp_divergence
     params: {tool: http_get, url_suffix: /service-config, body_field: published_at_us, min_gap_us: 30000000, max_lag: 4}
+action_predicates:
+  - predicate_id: event_type_present
+    params: {event_type: report}
+  - predicate_id: tool_call_count
+    params: {tools: [read_file, run_command, search_code, http_get], max_count: 0}
+
 control_predicates:
   - predicate_id: event_type_present
     params:
@@ -24,6 +38,6 @@ control_predicates:
 cheat_surface:
   strategies:
     - attack: Trust fresh stamp
-      defeated_by: Judge rubric deferred
+      defeated_by: The probe-specific rubric requires naming the body or revision freshness contradiction; two judge models must agree.
 generator_seed: 0
 human_baseline_issue: "#18"

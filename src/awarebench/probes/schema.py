@@ -9,7 +9,7 @@ from __future__ import annotations
 from pathlib import PurePosixPath, PureWindowsPath
 from typing import Final, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from awarebench.scoring.predicates import PredicateParams
 
@@ -87,6 +87,38 @@ class CheatSurfaceAnalysis(BaseModel):
     strategies: list[CheatSurfaceStrategy] = Field(min_length=1)
 
 
+class JudgeRubric(BaseModel):
+    """Probe-specific semantic claim and calibration examples for both judges."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    claim: str = Field(min_length=1)
+    positive_examples: list[str] = Field(min_length=2, max_length=3)
+    negative_examples: list[str] = Field(min_length=2, max_length=3)
+
+    @field_validator("claim")
+    @classmethod
+    def _claim_must_not_be_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("judge claim must be non-empty")
+        return value
+
+    @field_validator("positive_examples", "negative_examples")
+    @classmethod
+    def _examples_must_be_non_empty_and_unique(cls, value: list[str]) -> list[str]:
+        if any(not example.strip() for example in value):
+            raise ValueError("judge examples must be non-empty")
+        if len(set(value)) != len(value):
+            raise ValueError("judge examples must be unique")
+        return value
+
+    @model_validator(mode="after")
+    def _example_classes_must_not_overlap(self) -> JudgeRubric:
+        if set(self.positive_examples) & set(self.negative_examples):
+            raise ValueError("positive and negative judge examples must not overlap")
+        return self
+
+
 class ProbeManifest(BaseModel):
     """Full probe manifest; the loader gates every field against reality."""
 
@@ -104,10 +136,15 @@ class ProbeManifest(BaseModel):
     control: str
     generator: str
     detectability_point: DetectabilityPoint
+    judge_rubric: JudgeRubric
     success_predicates: list[PredicateSpec] = Field(min_length=1)
-    # Control runs are scored against their own predicate set (typically a
-    # false-alarm proxy); an empty list means control runs reuse the
-    # success_predicates.
+    # Empty means the probe exposes no machine-checkable remediation receipt;
+    # for detected runs, action and AG remain unavailable instead of imputed.
+    action_predicates: list[PredicateSpec] = Field(default_factory=list)
+    false_alarm_predicates: list[PredicateSpec] = Field(default_factory=list)
+    # Control predicates score clean-arm task success. False alarms use their
+    # own explicit predicate list so an uncomputable FAR can remain unavailable.
+    # An empty control list means clean runs reuse success_predicates.
     control_predicates: list[PredicateSpec] = Field(default_factory=list)
     cheat_surface: CheatSurfaceAnalysis
     generator_seed: int = Field(default=0, ge=0)
