@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import hashlib
-import shlex
 import json
+import shlex
 from collections.abc import Callable, Sequence
 from datetime import date
 from pathlib import Path
