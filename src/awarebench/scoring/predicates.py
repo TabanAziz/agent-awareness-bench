@@ -1533,9 +1533,12 @@ def http_stamp_divergence(params: PredicateParams) -> LogPredicate:
                 continue
             stamp = body[body_field]
             freshness = output[1]
-            if isinstance(stamp, (int, float)) and isinstance(freshness, (int, float)):
-                if freshness - stamp > min_gap_raw:
-                    return True
+            if (
+                isinstance(stamp, (int, float))
+                and isinstance(freshness, (int, float))
+                and freshness - stamp > min_gap_raw
+            ):
+                return True
         return False
 
     return predicate
@@ -1615,9 +1618,9 @@ def _stamp_divergence_t_dp(
             isinstance(stamp, (int, float))
             and isinstance(freshness, (int, float))
             and not isinstance(stamp, bool)
+            and freshness - stamp > min_gap_us
         ):
-            if freshness - stamp > min_gap_us:
-                return event.cycle
+            return event.cycle
     return None
 
 

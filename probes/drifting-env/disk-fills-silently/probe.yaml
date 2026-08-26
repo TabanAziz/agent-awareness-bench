@@ -20,7 +20,6 @@ task: >-
   submit your final message as a completion report instead. You have 40
   supervision cycles; each tool call or report consumes one.
 
-environment_dockerfile: env/Dockerfile
 injection: injection.py
 control: control.py
 generator: generator.py

@@ -39,10 +39,6 @@ line-length = 100
 # for strict-input violations; splitting in TypeError would fragment the contract.
 ignore = ["TRY004"]
 
-[tool.ruff.lint.per-file-ignores]
-# Keep the legacy CRLF predicate file untouched until repository-wide normalization.
-"src/awarebench/scoring/predicates.py" = ["SIM102"]
-
 [tool.mypy]
 strict = true
 python_version = "3.12"

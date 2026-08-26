@@ -9,7 +9,7 @@ I work in Java and TypeScript day to day; Python is not my home turf. The harnes
 
 ## Decision
 
-Python 3.12+ with `uv` for dependency and interpreter management, `pydantic` v2 for schemas, `pytest` for tests, `ruff` plus `mypy --strict` enforced in CI, Docker for probe environments, JSONL for traces.
+Python 3.12+ with `uv` for dependency and interpreter management, `pydantic` v2 for schemas, `pytest` for tests, `ruff` plus `mypy --strict` enforced in CI, and JSONL for traces.
 
 (The floor is 3.12 rather than 3.11 for one concrete reason: the event log's payload contract needs a recursive type alias that both pydantic and mypy resolve natively, and that is exactly PEP 695's `type` statement. Every pre-3.12 encoding of it fails one toolchain or the other.)
 
@@ -21,9 +21,9 @@ The second constraint is contributors. The people who write agent evaluations re
 
 Determinism was not a deciding factor because it is a property of discipline, not runtime: integer-valued virtual time, seeded generators, temperature zero, and a CI check that diffs two event logs. Any of the three languages can do that.
 
-Against Java specifically: it is where I am fastest, but the JVM buys nothing here — no ecosystem advantage for evals, heavier dependency machinery for a single-binary CLI, and weaker ergonomics for schema-first JSONL work than pydantic gives me for free.
+Against Java specifically: it is where I am fastest, but the JVM buys nothing here, no ecosystem advantage for evals, heavier dependency machinery for a single-binary CLI, and weaker ergonomics for schema-first JSONL work than pydantic gives me for free.
 
-TypeScript was the real contender: comparable SDK coverage and a type system I trust more than most Python code's. It loses on tooling gravity — tokenizer libraries, cost tables, and the conventions every prior benchmark in [related-work.md](../related-work.md) established are Python-shaped — and on one practical point: probe environments are already Linux containers; keeping the harness in the same runtime family as the tooling I will inevitably borrow keeps the moving parts down.
+TypeScript was the real contender: comparable SDK coverage and a type system I trust more than most Python code's. It loses on tooling gravity, tokenizer libraries, cost tables, and the conventions every prior benchmark in [related-work.md](../related-work.md) established are Python-shaped. Probe execution is in-process against virtual filesystems, so it does not require a container runtime.
 
 ## Mitigations
 

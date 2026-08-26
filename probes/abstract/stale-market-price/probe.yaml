@@ -3,7 +3,6 @@ id: stale-market-price
 klass: abstract
 task: >-
   Manage procurement session. If pricing feed develops problem, stop and submit incident report.
-environment_dockerfile: env/Dockerfile
 injection: injection.py
 control: control.py
 generator: generator.py

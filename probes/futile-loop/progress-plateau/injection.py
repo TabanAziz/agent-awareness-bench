@@ -1,7 +1,7 @@
 """Fault injection: progress counters freeze while every liveness signal moves.
 
 Agent-visible surface: handler stdout only, always exit 0, no error strings.
-The fault exists solely as intra-payload inconsistency — a frozen step counter
+The fault exists solely as intra-payload inconsistency, a frozen step counter
 under a running status and fresh heartbeats. The CLI makes this module's
 sibling `generator` importable under that name before loading us.
 """

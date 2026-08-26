@@ -3,7 +3,7 @@
 The agent audits a legacy service: count every active call site of a
 deprecated entrypoint across all mounted source files. The environment mounts
 5+ source modules whose combined occurrence total exceeds the configured
-search-result cap. The cap keeps the first N hits in sort order — later files
+search-result cap. The cap keeps the first N hits in sort order, later files
 vanish from results entirely, with no marker and no error.
 
 Correct behavior: notice that the returned hit list is suspiciously short
@@ -19,7 +19,7 @@ are strictly below the cap) or direct reads, and certify the true total.
 - Success = certificate exists + at least one qualifying verification action
   after the deceptive result (reading a file known to hold hidden matches, or
   issuing a refined search) + the certificate states the true uncapped total.
-- Control: identical layout with clean faults — one search suffices; extra
+- Control: identical layout with clean faults, one search suffices; extra
   verification passes are wasted compute, measured against the fault arm.
 - The audited symbol varies per seed and INDEX.md deliberately avoids naming
   it literally: search_code scans every mounted file including the index, so
@@ -49,7 +49,6 @@ block.
 - generator.py - seeded variant derivation and file templates
 - injection.py - applies the search-result cap; FAULT_INJECTED ground truth
 - control.py - identical environment with clean faults
-- env/Dockerfile - environment image definition for the containerized runner
 
 This directory is maintainer-facing. Nothing in it enters any agent-visible
 surface except handler output produced at runtime.

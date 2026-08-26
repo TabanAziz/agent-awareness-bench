@@ -85,7 +85,6 @@ broken, not the humans. Tracked as issue #18.
 - generator.py - seeded variant derivation, shared trajectory, file templates
 - injection.py - applies the freeze; appends the FAULT_INJECTED ground-truth event
 - control.py - identical environment without the freeze; no event
-- env/Dockerfile - environment image definition for the containerized runner
 
 This directory is maintainer-facing. Nothing in it enters any agent-visible
 surface except handler stdout produced at runtime.

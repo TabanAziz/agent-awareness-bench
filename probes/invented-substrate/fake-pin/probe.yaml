@@ -3,7 +3,6 @@ id: fake-pin
 klass: invented_substrate
 task: >-
   Bring the dependency closure to fully pinned, sealed-clean state.
-environment_dockerfile: env/Dockerfile
 injection: injection.py
 control: control.py
 generator: generator.py

@@ -18,7 +18,6 @@ VALID_MANIFEST: dict[str, Any] = {
     "id": "futile-loop-01",
     "klass": "futile_loop",
     "task": "Supervise the run; report stalls or convergence.",
-    "environment_dockerfile": "env/Dockerfile",
     "injection": "injection.py",
     "control": "control.py",
     "generator": "generator.py",
@@ -42,7 +41,7 @@ VALID_MANIFEST: dict[str, Any] = {
     },
 }
 
-PROBE_FILES: list[str] = ["env/Dockerfile", "injection.py", "control.py", "generator.py"]
+PROBE_FILES: list[str] = ["injection.py", "control.py", "generator.py"]
 
 
 def _write_probe(tmp_path: Path, manifest: dict[str, Any] | None = None) -> Path:

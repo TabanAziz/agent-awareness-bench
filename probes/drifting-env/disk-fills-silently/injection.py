@@ -2,7 +2,7 @@
 
 Agent-visible surface: handler stdout only, always exit 0. After the drift
 poll, commit_batch returns the same plausible receipt (bytes_written, status
-ok) while writing nothing to the journal — and check_storage pins free_mb at
+ok) while writing nothing to the journal, and check_storage pins free_mb at
 exactly zero under a live "online" status. The lie is cross-channel: one
 field cluster claims progress while another proves the volume is dead.
 """
