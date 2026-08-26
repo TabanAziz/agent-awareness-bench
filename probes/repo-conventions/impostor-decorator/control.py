@@ -15,3 +15,4 @@ def apply(parts, seed, log, variant):
         )
 
     parts.command_handlers["trace"] = trace
+    parts.command_samples = {"trace": ("trace",)}

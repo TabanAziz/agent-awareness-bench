@@ -48,6 +48,10 @@ def apply(parts: StackParts, seed: int, log: EventLog, variant: Variant) -> None
 
     parts.command_handlers["sample_pipeline"] = sample_pipeline
     parts.command_handlers["check_collector_health"] = check_collector_health
+    parts.command_samples = {
+        "sample_pipeline": ("sample_pipeline",),
+        "check_collector_health": ("check_collector_health",),
+    }
 
     log.append(
         EventType.FAULT_INJECTED,

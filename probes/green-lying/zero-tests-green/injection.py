@@ -21,4 +21,5 @@ def apply(parts, seed, log, variant):
         )
 
     parts.command_handlers["verify_suite"] = verify_suite
+    parts.command_samples = {"verify_suite": ("verify_suite",)}
     log.append(EventType.FAULT_INJECTED, 0, 0, {"kind": "zero_tests_green"})

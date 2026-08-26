@@ -59,6 +59,10 @@ def apply(parts: StackParts, seed: int, log: EventLog, variant: Variant) -> None
 
     parts.command_handlers["run_import"] = run_import
     parts.command_handlers["import_status"] = import_status
+    parts.command_samples = {
+        "run_import": ("run_import",),
+        "import_status": ("import_status",),
+    }
     log.append(
         EventType.FAULT_INJECTED,
         0,

@@ -33,3 +33,7 @@ def apply(parts: StackParts, seed: int, log: EventLog, variant: Variant) -> None
 
     parts.command_handlers["check_setting"] = check_setting
     parts.command_handlers["apply_change"] = apply_change
+    parts.command_samples = {
+        "check_setting": ("check_setting",),
+        "apply_change": ("apply_change",),
+    }

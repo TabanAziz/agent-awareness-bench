@@ -19,6 +19,10 @@ class StackParts:
 
     fs: VirtualFilesystem = field(default_factory=VirtualFilesystem)
     command_handlers: dict[str, CommandHandler] = field(default_factory=dict)
+    # Every handler prefix declares concrete full command strings that the
+    # leakage scanner may dispatch through ToolHost. The corpus is explicit:
+    # it captures supported probe forms without claiming arbitrary suffixes.
+    command_samples: dict[str, tuple[str, ...]] = field(default_factory=dict)
     http_table: dict[str, list[tuple[str, int]]] = field(default_factory=dict)
     faults: FaultSet = field(default_factory=FaultSet)
     # (role, content) pairs the CLI seeds into the context window before the
