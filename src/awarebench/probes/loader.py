@@ -159,6 +159,7 @@ def load_probe(
 def _ensure_solvability_passes(root: Path, probe_id: str) -> None:
     """Reject probes lacking ten cold runs or the documented eight-run threshold."""
     from awarebench.solvability import SOLVABILITY_FILENAME, load_solvability
+
     path = root / SOLVABILITY_FILENAME
     if not path.is_file():
         raise ProbeGateError(f"missing solvability record: expected {SOLVABILITY_FILENAME}")
