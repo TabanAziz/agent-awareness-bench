@@ -748,7 +748,7 @@ def test_openrouter_rejects_invalid_json() -> None:
         adapter.complete([])
 
 
-@pytest.mark.parametrize("constant", ["NaN", "Infinity", "-Infinity"])
+@pytest.mark.parametrize("constant", ["NaN", "Infinity", "-Infinity", "1e400"])
 def test_openrouter_rejects_non_finite_json_constants(constant: str) -> None:
     raw = _openrouter_response(reasoning=None)
     raw["choices"][0]["message"]["reasoning_details"] = [
@@ -781,6 +781,32 @@ def test_openrouter_rejects_non_finite_request_metadata_before_transport() -> No
         )
 
     assert transport.calls == []
+
+
+def test_openrouter_rejects_oversized_injected_transport_response() -> None:
+    adapter = OpenRouterAdapter(
+        model="vendor/model",
+        api_key="key",
+        transport=_RecordingTransport(b"x" * (openrouter_module.MAX_RESPONSE_BYTES + 1)),
+    )
+
+    with pytest.raises(AdapterError, match="size limit"):
+        adapter.complete([])
+
+
+def test_openrouter_rejects_non_bytes_injected_transport_response() -> None:
+    def non_bytes_transport(request: Request, timeout: float) -> Any:
+        del request, timeout
+        return "not bytes"
+
+    adapter = OpenRouterAdapter(
+        model="vendor/model",
+        api_key="key",
+        transport=non_bytes_transport,
+    )
+
+    with pytest.raises(AdapterError, match="non-bytes"):
+        adapter.complete([])
 
 
 @pytest.mark.parametrize(

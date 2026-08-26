@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any, Final
@@ -26,6 +27,17 @@ Transport = Callable[[Request, float], bytes]
 
 def _reject_json_constant(value: str) -> None:
     raise ValueError(f"non-finite JSON constant: {value}")
+
+
+def _validate_finite_json(node: Any) -> None:
+    if isinstance(node, float) and not math.isfinite(node):
+        raise ValueError("non-finite JSON number")
+    if isinstance(node, dict):
+        for value in node.values():
+            _validate_finite_json(value)
+    elif isinstance(node, list):
+        for value in node:
+            _validate_finite_json(value)
 
 
 class _RejectRedirects(HTTPRedirectHandler):
@@ -185,11 +197,16 @@ class OpenRouterAdapter:
             raise AdapterError(f"openrouter request failed with HTTP {exc.code}") from exc
         except Exception as exc:
             raise AdapterError(f"openrouter request failed: {type(exc).__name__}") from exc
+        if not isinstance(raw_response, bytes):
+            raise AdapterError("openrouter transport returned a non-bytes response")
+        if len(raw_response) > MAX_RESPONSE_BYTES:
+            raise AdapterError("openrouter response exceeded size limit")
         try:
             payload = json.loads(
                 raw_response.decode("utf-8"),
                 parse_constant=_reject_json_constant,
             )
+            _validate_finite_json(payload)
         except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
             raise AdapterError("openrouter response was not valid JSON") from exc
         return self._map_response(payload)
